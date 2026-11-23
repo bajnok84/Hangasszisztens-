@@ -46,7 +46,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> { ix = params.x; iy = params.y; itx = e.rawX; ity = e.rawY; return true }
                     MotionEvent.ACTION_MOVE -> { params.x = ix + (e.rawX - itx).toInt(); params.y = iy + (e.rawY - ity).toInt(); windowManager.updateViewLayout(floatingView, params); return true }
-                    MotionEvent.ACTION_UP -> { if (abs(e.rawX - itx) < 10 && abs(e.rawY - ity) < 10) toggleListening(); return true }
+                    MotionEvent.ACTION_UP -> { if (abs(e.rawX - itx) < 15 && abs(e.rawY - ity) < 15) toggleListening(); return true }
                 }
                 return false
             }
@@ -57,12 +57,24 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(p: Bundle?) { icon.setColorFilter(Color.RED); Toast.makeText(this@FloatingAssistantService, "Hallgatlak...", Toast.LENGTH_SHORT).show() }
+                override fun onReadyForSpeech(p: Bundle?) {
+                    icon.setColorFilter(Color.parseColor("#FF5252"))
+                    Toast.makeText(this@FloatingAssistantService, "Hallgatlak...", Toast.LENGTH_SHORT).show()
+                }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(b: ByteArray?) {}
-                override fun onEndOfSpeech() { icon.clearColorFilter(); isListening = false }
-                override fun onError(err: Int) { icon.clearColorFilter(); isListening = false; Toast.makeText(this@FloatingAssistantService, "Nem értettem ($err)", Toast.LENGTH_SHORT).show() }
+                override fun onEndOfSpeech() {
+                    icon.clearColorFilter()
+                    isListening = false
+                }
+                override fun onError(err: Int) {
+                    icon.clearColorFilter()
+                    isListening = false
+                    if (err != SpeechRecognizer.ERROR_NO_MATCH && err != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        Toast.makeText(this@FloatingAssistantService, "Mikrofon hiba ($err)", Toast.LENGTH_SHORT).show()
+                    }
+                }
                 override fun onResults(results: Bundle?) {
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
                     Toast.makeText(this@FloatingAssistantService, "Ezt mondtad: $text", Toast.LENGTH_LONG).show()
@@ -75,7 +87,12 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun toggleListening() {
-        if (isListening) { speechRecognizer?.stopListening(); isListening = false; icon.clearColorFilter(); return }
+        if (isListening) {
+            speechRecognizer?.stopListening()
+            isListening = false
+            icon.clearColorFilter()
+            return
+        }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU")
@@ -97,12 +114,17 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(chId, "Asszisztens", NotificationManager.IMPORTANCE_LOW))
         }
-        val notif = NotificationCompat.Builder(this, chId).setContentTitle("HangAsszisztens aktív").setSmallIcon(android.R.drawable.ic_btn_speak_now).build()
+        val notif = NotificationCompat.Builder(this, chId)
+            .setContentTitle("HangAsszisztens aktív")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .build()
         startForeground(1, notif)
     }
 
     override fun onDestroy() {
-        super.onDestroy(); speechRecognizer?.destroy(); tts?.shutdown()
+        super.onDestroy()
+        speechRecognizer?.destroy()
+        tts?.shutdown()
         if (::floatingView.isInitialized) windowManager.removeView(floatingView)
     }
 }
