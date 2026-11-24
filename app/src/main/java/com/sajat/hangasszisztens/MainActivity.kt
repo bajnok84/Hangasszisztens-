@@ -1,43 +1,19 @@
 package com.sajat.hangasszisztens
-
-import android.Manifest
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.provider.Settings
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-
+import android.Manifest; import android.content.*; import android.graphics.Color; import android.graphics.drawable.GradientDrawable; import android.net.Uri; import android.os.*; import android.provider.Settings; import android.text.InputType; import android.view.Gravity; import android.widget.*; import androidx.appcompat.app.AppCompatActivity; import androidx.core.app.ActivityCompat
 class MainActivity : AppCompatActivity() {
-    private val overlayLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (Settings.canDrawOverlays(this)) startAssistant()
-        else Toast.makeText(this, "Engedélyezd a megjelenítést más appok felett!", Toast.LENGTH_LONG).show()
-    }
-    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        checkOverlay()
-    }
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        val missing = perms.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) permLauncher.launch(missing.toTypedArray())
-        else checkOverlay()
-    }
-    private fun checkOverlay() {
-        if (!Settings.canDrawOverlays(this)) {
-            overlayLauncher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-        } else startAssistant()
-    }
-    private fun startAssistant() {
-        val intent = Intent(this, FloatingAssistantService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
-        finish()
+    override fun onCreate(s: Bundle?) {
+        super.onCreate(s)
+        val p = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 56, 48, 56); setBackgroundColor(Color.parseColor("#0A0F1C")) }
+        fun btn(t: String, c: String, f: () -> Unit) = Button(this).apply { text = t; setTextColor(Color.WHITE); background = GradientDrawable().apply { cornerRadius = 20f; setColor(Color.parseColor(c)) }; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 12, 0, 12) }; setOnClickListener { f() } }
+        root.addView(TextView(this).apply { text = "J.A.R.V.I.S. Vezérlőpult"; textSize = 22f; setTextColor(Color.parseColor("#00E5FF")); gravity = Gravity.CENTER })
+        root.addView(btn("1. Mikrofon + Értesítés", "#1E293B") { ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, "android.permission.POST_NOTIFICATIONS"), 1) })
+        root.addView(btn("2. Lebegő ablak engedély", "#1E293B") { if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
+        val inp = EditText(this).apply { hint = "Gemini API-kulcs (AIza...)"; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); setText(p.getString("gemini_key", "")); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+        root.addView(inp)
+        root.addView(btn("API-kulcs mentése", "#0284C7") { p.edit().putString("gemini_key", inp.text.toString().trim()).apply(); Toast.makeText(this, "Mentve!", Toast.LENGTH_SHORT).show() })
+        root.addView(btn("▶ ASSZISZTENS INDÍTÁSA", "#059669") { val i = Intent(this, FloatingAssistantService::class.java); if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i) })
+        root.addView(btn("■ LEÁLLÍTÁS", "#B91C1C") { stopService(Intent(this, FloatingAssistantService::class.java)) })
+        setContentView(ScrollView(this).apply { addView(root); setBackgroundColor(Color.parseColor("#0A0F1C")) })
     }
 }
