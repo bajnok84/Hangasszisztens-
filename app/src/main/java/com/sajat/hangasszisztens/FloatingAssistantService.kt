@@ -105,14 +105,32 @@ class FloatingAssistantService : Service() {
         thread {
             try {
                 if (hist.size >= 6) hist.removeFirst(); hist.addLast("F: $q")
-                val u = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$k")
-                val conn = (u.openConnection() as HttpURLConnection).apply { requestMethod = "POST"; setRequestProperty("Content-Type", "application/json; charset=UTF-8"); doOutput = true }
+                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                val u = URL(if (k.startsWith("AIza")) "$endpoint?key=$k" else endpoint)
+                val conn = (u.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                    if (!k.startsWith("AIza")) setRequestProperty("x-goog-api-key", k)
+                    doOutput = true
+                }
                 val prompt = "Te J.A.R.V.I.S. magyar hangasszisztens vagy. Válaszolj 2 rövid, tömör mondatban, formázás nélkül.\n" + hist.joinToString("\n")
                 val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
                 conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                val responseCode = conn.responseCode
+                if (responseCode !in 200..299) {
+                    val response = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    val message = "Gemini HTTP $responseCode: $response"
+                    android.util.Log.e("J.A.R.V.I.S.", message)
+                    h.post { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+                    say("Gemini HTTP hiba: $responseCode")
+                    return@thread
+                }
                 val ans = JSONObject(conn.inputStream.bufferedReader().readText()).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text").replace("*", "").trim()
                 if (hist.size >= 6) hist.removeFirst(); hist.addLast("A: $ans"); say(ans)
-            } catch (_: Exception) { say("Gemini hiba, ellenőrizd a netet vagy a kulcsot.") }
+            } catch (e: Exception) {
+                android.util.Log.e("J.A.R.V.I.S.", "Gemini kérés sikertelen", e)
+                say("Gemini hiba, ellenőrizd a netet vagy a kulcsot.")
+            }
         }
     }
     override fun onDestroy() { try { wm.removeView(root); wm.removeView(closeBtn) } catch (_: Exception) {}; sr?.destroy(); tts?.shutdown(); super.onDestroy() }

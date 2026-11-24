@@ -9,20 +9,32 @@ class MainActivity : AppCompatActivity() {
         root.addView(TextView(this).apply { text = "J.A.R.V.I.S. Vezérlőpult"; textSize = 22f; setTextColor(Color.parseColor("#00E5FF")); gravity = Gravity.CENTER })
         root.addView(btn("1. Mikrofon + Értesítés", "#1E293B") { ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, "android.permission.POST_NOTIFICATIONS"), 1) })
         root.addView(btn("2. Lebegő ablak engedély", "#1E293B") { if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-        val inp = EditText(this).apply { hint = "Gemini API-kulcs (AIza...)"; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); setText(p.getString("gemini_key", "")); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD }
+        val inp = EditText(this).apply { hint = "Gemini API-kulcs"; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); setText(p.getString("gemini_key", "")); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD }
         root.addView(inp)
         val status = TextView(this).apply { text = ""; textSize = 14f; setTextColor(Color.parseColor("#38BDF8")); setPadding(0, 12, 0, 12) }
         root.addView(btn("API-kulcs mentése és tesztelése", "#0284C7") {
             val k = inp.text.toString().trim()
-            if (k.length < 10) { status.text = "Hiba: A Gemini kulcs mindig AIza-val kezdődik!"; return@btn }
+            if (k.length < 10) { status.text = "Hiba: Érvénytelen Gemini API-kulcs."; return@btn }
             p.edit().putString("gemini_key", k).apply()
             status.text = "Mentve! Kapcsolat tesztelése..."
             thread {
                 try {
-                    val u = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$k")
-                    val conn = (u.openConnection() as HttpURLConnection).apply { requestMethod = "POST"; setRequestProperty("Content-Type", "application/json"); doOutput = true }
+                    val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                    val u = URL(if (k.startsWith("AIza")) "$endpoint?key=$k" else endpoint)
+                    val conn = (u.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        setRequestProperty("Content-Type", "application/json")
+                        if (!k.startsWith("AIza")) setRequestProperty("x-goog-api-key", k)
+                        doOutput = true
+                    }
                     val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", "Mondd magyarul 3 szóban: Működik a kapcsolat.")))))
                     conn.outputStream.use { it.write(body.toString().toByteArray()) }
+                    val responseCode = conn.responseCode
+                    if (responseCode !in 200..299) {
+                        val response = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                        runOnUiThread { status.text = "HIBA: HTTP $responseCode: $response" }
+                        return@thread
+                    }
                     val ans = JSONObject(conn.inputStream.bufferedReader().readText()).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
                     runOnUiThread { status.text = "SIKER: $ans" }
                 } catch (e: Exception) { runOnUiThread { status.text = "HIBA: ${e.message}" } }
