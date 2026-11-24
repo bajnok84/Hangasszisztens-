@@ -1,36 +1,227 @@
 package com.sajat.hangasszisztens
-import android.Manifest; import android.content.*; import android.graphics.Color; import android.graphics.drawable.GradientDrawable; import android.net.Uri; import android.os.*; import android.provider.Settings; import android.text.InputType; import android.view.Gravity; import android.widget.*; import androidx.appcompat.app.AppCompatActivity; import androidx.core.app.ActivityCompat; import kotlin.concurrent.thread
+
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import kotlin.concurrent.thread
+
 class MainActivity : AppCompatActivity() {
-    override fun onCreate(s: Bundle?) {
-        super.onCreate(s)
-        val p = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 56, 48, 56); setBackgroundColor(Color.parseColor("#0A0F1C")) }
-        fun btn(t: String, c: String, f: () -> Unit) = Button(this).apply { text = t; setTextColor(Color.WHITE); background = GradientDrawable().apply { cornerRadius = 20f; setColor(Color.parseColor(c)) }; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 12, 0, 12) }; setOnClickListener { f() } }
-        root.addView(TextView(this).apply { text = "J.A.R.V.I.S. Vezérlőpult"; textSize = 22f; setTextColor(Color.parseColor("#00E5FF")); gravity = Gravity.CENTER })
-        root.addView(btn("1. Mikrofon + Bluetooth + Értesítés", "#1E293B") {
-            val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS, "android.permission.POST_NOTIFICATIONS")
-            if (Build.VERSION.SDK_INT >= 31) permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val preferences = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#060B19"))
+        }
+        root.addView(HudBackgroundView(this), FrameLayout.LayoutParams(-1, -1))
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(28), dp(40), dp(28), dp(32))
+        }
+
+        fun button(
+            label: String,
+            borderColor: Int = Color.parseColor("#00E676"),
+            fillColor: Int = Color.argb(150, 9, 24, 38),
+            textColor: Int = Color.WHITE,
+            onClick: () -> Unit
+        ) = Button(this).apply {
+            text = label
+            textSize = 14f
+            letterSpacing = 0.035f
+            setTextColor(textColor)
+            setShadowLayer(dp(2).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
+            val shape = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(fillColor)
+                setStroke(dp(1), borderColor)
+            }
+            val mask = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(Color.WHITE)
+            }
+            background = RippleDrawable(
+                ColorStateList.valueOf(Color.argb(110, 0, 230, 118)),
+                shape,
+                mask
+            )
+            layoutParams = LinearLayout.LayoutParams(-1, dp(56)).apply {
+                setMargins(0, dp(9), 0, dp(9))
+            }
+            setOnTouchListener { view, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> view.animate()
+                        .scaleX(0.975f).scaleY(0.975f).setDuration(90L)
+                        .setInterpolator(AccelerateDecelerateInterpolator()).start()
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.animate()
+                        .scaleX(1f).scaleY(1f).setDuration(140L)
+                        .setInterpolator(AccelerateDecelerateInterpolator()).start()
+                }
+                false
+            }
+            setOnClickListener { onClick() }
+        }
+
+        content.addView(TextView(this).apply {
+            text = "J.A.R.V.I.S.\nVEZÉRLŐPULT"
+            textSize = 24f
+            letterSpacing = 0.08f
+            setTextColor(Color.parseColor("#E8FFF5"))
+            setShadowLayer(dp(4).toFloat(), 0f, dp(2).toFloat(), Color.BLACK)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(20))
+        })
+
+        content.addView(button("1. MIKROFON + BLUETOOTH + ÉRTESÍTÉS") {
+            val permissions = mutableListOf(
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.MODIFY_AUDIO_SETTINGS,
+                Manifest.permission.POST_NOTIFICATIONS
+            )
+            if (Build.VERSION.SDK_INT >= 31) {
+                permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 1)
         })
-        root.addView(btn("2. Lebegő ablak engedély", "#1E293B") { if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
-        val inp = EditText(this).apply { hint = "Gemini API-kulcs"; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); setText(p.getString("gemini_key", "")); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD }
-        root.addView(inp)
-        val status = TextView(this).apply { text = ""; textSize = 14f; setTextColor(Color.parseColor("#38BDF8")); setPadding(0, 12, 0, 12) }
-        root.addView(btn("API-kulcs mentése és tesztelése", "#0284C7") {
-            val k = inp.text.toString().trim()
-            if (k.length < 10) { status.text = "Hiba: Érvénytelen Gemini API-kulcs."; return@btn }
-            p.edit().putString("gemini_key", k).apply()
+        content.addView(button(
+            "2. LEBEGŐ ABLAK ENGEDÉLY",
+            borderColor = Color.parseColor("#00E5FF")
+        ) {
+            if (!Settings.canDrawOverlays(this)) {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
+        })
+
+        val input = EditText(this).apply {
+            hint = "Gemini API-kulcs"
+            setHintTextColor(Color.parseColor("#91A7B8"))
+            setTextColor(Color.WHITE)
+            setShadowLayer(dp(1).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
+            setText(preferences.getString("gemini_key", ""))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.argb(190, 8, 17, 33))
+                setStroke(dp(1), Color.parseColor("#8800E5FF"))
+            }
+            setPadding(dp(16), 0, dp(16), 0)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(54)).apply {
+                setMargins(0, dp(14), 0, dp(8))
+            }
+        }
+        content.addView(input)
+
+        val status = TextView(this).apply {
+            text = ""
+            textSize = 14f
+            setTextColor(Color.parseColor("#8FFFD0"))
+            setShadowLayer(dp(2).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+        }
+        content.addView(button(
+            "API-KULCS MENTÉSE ÉS TESZTELÉSE",
+            borderColor = Color.parseColor("#00E5FF")
+        ) {
+            val key = input.text.toString().trim()
+            if (key.length < 10) {
+                status.text = "Hiba: Érvénytelen Gemini API-kulcs."
+                return@button
+            }
+            preferences.edit().putString("gemini_key", key).apply()
             status.text = "Mentve! Kapcsolat tesztelése..."
             thread {
                 try {
-                    val ans = GeminiApi.generateContent(k, "Mondd magyarul 3 szóban: Működik a kapcsolat.")
-                    runOnUiThread { status.text = "SIKER: $ans" }
-                } catch (e: Exception) { runOnUiThread { status.text = "HIBA: ${e.message}" } }
+                    val answer = GeminiApi.generateContent(
+                        key,
+                        "Mondd magyarul 3 szóban: Működik a kapcsolat."
+                    )
+                    runOnUiThread { status.text = "SIKER: $answer" }
+                } catch (error: Exception) {
+                    runOnUiThread { status.text = "HIBA: ${error.message}" }
+                }
             }
         })
-        root.addView(status)
-        root.addView(btn("▶ ASSZISZTENS INDÍTÁSA", "#059669") { val i = Intent(this, FloatingAssistantService::class.java); if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i) })
-        root.addView(btn("■ LEÁLLÍTÁS", "#B91C1C") { stopService(Intent(this, FloatingAssistantService::class.java)) })
-        setContentView(ScrollView(this).apply { addView(root); setBackgroundColor(Color.parseColor("#0A0F1C")) })
+        content.addView(status)
+        content.addView(button(
+            "▶ ASSZISZTENS INDÍTÁSA",
+            fillColor = Color.parseColor("#00E676"),
+            textColor = Color.parseColor("#04120C")
+        ) {
+            val intent = Intent(this, FloatingAssistantService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+        })
+        content.addView(button(
+            "■ LEÁLLÍTÁS",
+            borderColor = Color.parseColor("#FF5277"),
+            textColor = Color.parseColor("#FFE7EC")
+        ) {
+            stopService(Intent(this, FloatingAssistantService::class.java))
+        })
+
+        root.addView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(content)
+        }, FrameLayout.LayoutParams(-1, -1))
+        setContentView(root)
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private inner class HudBackgroundView(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Color.parseColor("#2200E676")
+            strokeWidth = dp(1).toFloat()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val centerX = width * 0.82f
+            val centerY = height * 0.22f
+            val radius = dp(100).toFloat()
+            for (scale in floatArrayOf(0.68f, 0.82f, 1f, 1.18f)) {
+                canvas.drawCircle(centerX, centerY, radius * scale, paint)
+            }
+            paint.color = Color.parseColor("#2200E5FF")
+            val arcBounds = RectF(
+                centerX - radius * 1.18f,
+                centerY - radius * 1.18f,
+                centerX + radius * 1.18f,
+                centerY + radius * 1.18f
+            )
+            canvas.drawArc(arcBounds, 205f, 72f, false, paint)
+            canvas.drawArc(arcBounds, 25f, 48f, false, paint)
+            paint.color = Color.parseColor("#1800E676")
+            canvas.drawCircle(width * 0.14f, height * 0.78f, dp(78).toFloat(), paint)
+        }
     }
 }

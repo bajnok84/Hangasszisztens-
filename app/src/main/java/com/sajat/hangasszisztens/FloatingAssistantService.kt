@@ -77,7 +77,7 @@ class FloatingAssistantService : Service() {
         closeParams = WindowManager.LayoutParams(dp(58f), dp(58f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(48f) }
         wm.addView(closeBtn, closeParams); wm.addView(root, params); dock(); touch(); initSr(); initMediaSession()
     }
-    private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#770A0F1C")); setStroke(dp(1f), Color.parseColor("#8800E5FF")) }
+    private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#AA060B19")); setStroke(dp(1f), Color.parseColor("#7700E676")) }
     private fun dock() { docked = true; root.background = null; icon.setHudState(true, listening || speaking || pendingSrStart); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
     private fun undock() {
         docked = false
@@ -269,28 +269,29 @@ class FloatingAssistantService : Service() {
             val cx = width / 2f
             val cy = height / 2f
             val cyan = Color.rgb(0, 229, 255)
-            val alpha = (150 + 105 * pulse).toInt().coerceIn(0, 255)
+            val green = Color.rgb(0, 230, 118)
+            val alpha = (70 + 75 * pulse).toInt().coerceIn(0, 255)
 
             paint.style = Paint.Style.FILL
             paint.shader = RadialGradient(
                 cx, cy, dp(if (isDocked) 24f else 42f) * (0.72f + pulse * 0.45f),
-                intArrayOf(Color.argb(alpha, 0, 229, 255), Color.argb(0, 0, 229, 255)),
+                intArrayOf(Color.argb(alpha, 0, 230, 118), Color.argb(0, 0, 229, 255)),
                 null,
                 Shader.TileMode.CLAMP
             )
             if (isDocked) {
                 val track = RectF(cx - dp(4f), dp(8f).toFloat(), cx + dp(4f), height - dp(8f).toFloat())
                 paint.shader = null
-                paint.color = Color.argb(65, 0, 229, 255)
+                paint.color = Color.argb(50, 0, 230, 118)
                 canvas.drawRoundRect(track, dp(5f).toFloat(), dp(5f).toFloat(), paint)
                 paint.shader = RadialGradient(
                     cx, cy, dp(24f) * (0.72f + pulse * 0.45f),
-                    intArrayOf(Color.argb(alpha, 0, 229, 255), Color.argb(0, 0, 229, 255)),
+                    intArrayOf(Color.argb(alpha, 0, 230, 118), Color.argb(0, 0, 229, 255)),
                     null, Shader.TileMode.CLAMP
                 )
                 canvas.drawCircle(cx, cy, dp(24f) * (0.72f + pulse * 0.45f), paint)
                 paint.shader = null
-                paint.color = Color.argb(alpha, 0, 229, 255)
+                paint.color = Color.argb(alpha, 0, 230, 118)
                 canvas.drawRoundRect(
                     RectF(cx - dp(2f), cy - dp(13f) * (0.75f + pulse * 0.35f), cx + dp(2f), cy + dp(13f) * (0.75f + pulse * 0.35f)),
                     dp(3f).toFloat(), dp(3f).toFloat(), paint
@@ -304,7 +305,8 @@ class FloatingAssistantService : Service() {
                 val rings = listOf(0.34f, 0.52f, 0.72f, 0.91f)
                 rings.forEachIndexed { index, scale ->
                     paint.strokeWidth = dp(if (index == 2) 2f else 1f).toFloat()
-                    paint.color = Color.argb((alpha * (1f - index * 0.13f)).toInt(), 0, 229, 255)
+                    val ringColor = if (index % 2 == 0) green else cyan
+                    paint.color = Color.argb((alpha * (1f - index * 0.13f)).toInt(), Color.red(ringColor), Color.green(ringColor), Color.blue(ringColor))
                     canvas.drawCircle(cx, cy, radius * scale, paint)
                 }
                 val bounds = RectF(cx - radius * 0.82f, cy - radius * 0.82f, cx + radius * 0.82f, cy + radius * 0.82f)
@@ -317,13 +319,13 @@ class FloatingAssistantService : Service() {
                 val coreRadius = radius * (0.17f + pulse * 0.035f)
                 paint.shader = RadialGradient(
                     cx, cy, coreRadius * 1.8f,
-                    intArrayOf(Color.WHITE, cyan, Color.argb(0, 0, 229, 255)),
-                    floatArrayOf(0f, 0.42f, 1f),
+                    intArrayOf(Color.WHITE, green, cyan, Color.argb(0, 0, 229, 255)),
+                    floatArrayOf(0f, 0.35f, 0.62f, 1f),
                     Shader.TileMode.CLAMP
                 )
                 canvas.drawCircle(cx, cy, coreRadius * 1.8f, paint)
                 paint.shader = null
-                paint.color = Color.argb(alpha, 0, 229, 255)
+                paint.color = Color.argb(alpha, 0, 230, 118)
                 canvas.drawCircle(cx, cy, coreRadius, paint)
             }
             paint.shader = null
