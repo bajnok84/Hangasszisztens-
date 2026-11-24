@@ -5,6 +5,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.speech.tts.UtteranceProgressListener
 import androidx.core.content.ContextCompat
 class FloatingAssistantService : Service() {
     private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ReactorHudView; private lateinit var closeBtn: TextView
@@ -51,7 +52,7 @@ class FloatingAssistantService : Service() {
                 tts?.apply {
                     setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     language = Locale("hu", "HU")
-                    setOnUtteranceProgressListener(object : TextToSpeech.UtteranceProgressListener() {
+                    setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             h.post { speaking = true; updateHudAnimation() }
                         }
