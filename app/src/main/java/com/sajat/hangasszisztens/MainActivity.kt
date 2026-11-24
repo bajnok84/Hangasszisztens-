@@ -14,7 +14,7 @@ class MainActivity : AppCompatActivity() {
         val status = TextView(this).apply { text = ""; textSize = 14f; setTextColor(Color.parseColor("#38BDF8")); setPadding(0, 12, 0, 12) }
         root.addView(btn("API-kulcs mentése és tesztelése", "#0284C7") {
             val k = inp.text.toString().trim()
-            if (!k.startsWith("AIza")) { status.text = "Hiba: A Gemini kulcs mindig AIza-val kezdődik!"; return@btn }
+            if (k.length < 10) { status.text = "Hiba: A Gemini kulcs mindig AIza-val kezdődik!"; return@btn }
             p.edit().putString("gemini_key", k).apply()
             status.text = "Mentve! Kapcsolat tesztelése..."
             thread {
