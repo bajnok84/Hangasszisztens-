@@ -1,5 +1,5 @@
 package com.sajat.hangasszisztens
-import android.Manifest; import android.content.*; import android.graphics.Color; import android.graphics.drawable.GradientDrawable; import android.net.Uri; import android.os.*; import android.provider.Settings; import android.text.InputType; import android.view.Gravity; import android.widget.*; import androidx.appcompat.app.AppCompatActivity; import androidx.core.app.ActivityCompat; import org.json.*; import java.net.*; import kotlin.concurrent.thread
+import android.Manifest; import android.content.*; import android.graphics.Color; import android.graphics.drawable.GradientDrawable; import android.net.Uri; import android.os.*; import android.provider.Settings; import android.text.InputType; import android.view.Gravity; import android.widget.*; import androidx.appcompat.app.AppCompatActivity; import androidx.core.app.ActivityCompat; import kotlin.concurrent.thread
 class MainActivity : AppCompatActivity() {
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
@@ -23,23 +23,7 @@ class MainActivity : AppCompatActivity() {
             status.text = "Mentve! Kapcsolat tesztelése..."
             thread {
                 try {
-                    val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
-                    val u = URL(if (k.startsWith("AIza")) "$endpoint?key=$k" else endpoint)
-                    val conn = (u.openConnection() as HttpURLConnection).apply {
-                        requestMethod = "POST"
-                        setRequestProperty("Content-Type", "application/json")
-                        if (!k.startsWith("AIza")) setRequestProperty("x-goog-api-key", k)
-                        doOutput = true
-                    }
-                    val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", "Mondd magyarul 3 szóban: Működik a kapcsolat.")))))
-                    conn.outputStream.use { it.write(body.toString().toByteArray()) }
-                    val responseCode = conn.responseCode
-                    if (responseCode !in 200..299) {
-                        val response = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                        runOnUiThread { status.text = "HIBA: HTTP $responseCode: $response" }
-                        return@thread
-                    }
-                    val ans = JSONObject(conn.inputStream.bufferedReader().readText()).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+                    val ans = GeminiApi.generateContent(k, "Mondd magyarul 3 szóban: Működik a kapcsolat.")
                     runOnUiThread { status.text = "SIKER: $ans" }
                 } catch (e: Exception) { runOnUiThread { status.text = "HIBA: ${e.message}" } }
             }

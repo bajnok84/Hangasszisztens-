@@ -1,5 +1,5 @@
 package com.sajat.hangasszisztens
-import android.app.*; import android.content.*; import android.graphics.*; import android.graphics.drawable.GradientDrawable; import android.hardware.camera2.CameraManager; import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.view.*; import android.widget.*; import androidx.core.app.NotificationCompat; import org.json.*; import java.net.*; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs
+import android.animation.ValueAnimator; import android.app.*; import android.content.*; import android.graphics.*; import android.graphics.drawable.GradientDrawable; import android.hardware.camera2.CameraManager; import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.view.*; import android.view.animation.AccelerateDecelerateInterpolator; import android.widget.*; import androidx.core.app.NotificationCompat; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs; import kotlin.math.min
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -7,7 +7,7 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import androidx.core.content.ContextCompat
 class FloatingAssistantService : Service() {
-    private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ImageView; private lateinit var closeBtn: TextView
+    private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ReactorHudView; private lateinit var closeBtn: TextView
     private lateinit var params: WindowManager.LayoutParams; private lateinit var closeParams: WindowManager.LayoutParams
     private var sr: SpeechRecognizer? = null; private var tts: TextToSpeech? = null; private val h = Handler(Looper.getMainLooper()); private val hist = ArrayDeque<String>()
     private lateinit var audioManager: AudioManager
@@ -16,10 +16,11 @@ class FloatingAssistantService : Service() {
     private var originalAudioMode = AudioManager.MODE_NORMAL
     private var originalSpeakerphoneOn = false
     private var originalCommunicationDevice: AudioDeviceInfo? = null
-    private var docked = true; private var right = true; private var listening = false; private var sw = 1080; private var sh = 2400
+    private var docked = true; private var right = true; private var listening = false; private var speaking = false; private var sw = 1080; private var sh = 2400
     private val scoStartTimeout = Runnable {
         if (pendingSrStart) {
             pendingSrStart = false
+            updateHudAnimation()
             beginSr()
         }
     }
@@ -28,6 +29,7 @@ class FloatingAssistantService : Service() {
             if (intent?.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_ERROR) == AudioManager.SCO_AUDIO_STATE_CONNECTED && pendingSrStart) {
                 h.removeCallbacks(scoStartTimeout)
                 pendingSrStart = false
+                updateHudAnimation()
                 beginSr()
             }
         }
@@ -44,23 +46,43 @@ class FloatingAssistantService : Service() {
         val ch = "jarvis_ch"; if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(ch, "J.A.R.V.I.S.", NotificationManager.IMPORTANCE_LOW))
         startForeground(1, NotificationCompat.Builder(this, ch).setContentTitle("J.A.R.V.I.S. aktív").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
         wm = getSystemService(WINDOW_SERVICE) as WindowManager; sw = resources.displayMetrics.widthPixels; sh = resources.displayMetrics.heightPixels
-        tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) { tts?.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()); tts?.language = Locale("hu", "HU") } }
-        root = FrameLayout(this); icon = ImageView(this); root.addView(icon)
+        tts = TextToSpeech(this) {
+            if (it == TextToSpeech.SUCCESS) {
+                tts?.apply {
+                    setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    language = Locale("hu", "HU")
+                    setOnUtteranceProgressListener(object : TextToSpeech.UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {
+                            h.post { speaking = true; updateHudAnimation() }
+                        }
+                        override fun onDone(utteranceId: String?) {
+                            h.post { speaking = false; updateHudAnimation() }
+                        }
+                        override fun onError(utteranceId: String?) {
+                            h.post { speaking = false; updateHudAnimation() }
+                        }
+                        override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                            h.post { speaking = false; updateHudAnimation() }
+                        }
+                    })
+                }
+            }
+        }
+        root = FrameLayout(this)
+        icon = ReactorHudView(this)
+        root.addView(icon, FrameLayout.LayoutParams(-1, -1))
         val t = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
-        params = WindowManager.LayoutParams(dp(14f), dp(145f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = sw - dp(14f); y = sh / 3 }
+        params = WindowManager.LayoutParams(dp(22f), dp(145f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = sw - dp(22f); y = sh / 3 }
         closeBtn = TextView(this).apply { text = "✕"; textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#E53935")) }; visibility = View.GONE }
         closeParams = WindowManager.LayoutParams(dp(58f), dp(58f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(48f) }
         wm.addView(closeBtn, closeParams); wm.addView(root, params); dock(); touch(); initSr(); initMediaSession()
     }
     private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#770A0F1C")); setStroke(dp(1f), Color.parseColor("#8800E5FF")) }
-    private fun dock() { docked = true; root.background = null; icon.setImageDrawable(GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#6600E5FF")); setStroke(dp(1f), Color.parseColor("#8800E5FF")) }); params.width = dp(14f); params.height = dp(145f); params.x = if (right) sw - dp(14f) else
-
-
-0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
+    private fun dock() { docked = true; root.background = null; icon.setHudState(true, listening || speaking || pendingSrStart); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
     private fun undock() {
         docked = false
         root.background = hudBackground()
-        icon.setImageResource(R.drawable.jarvis_3d_icon)
+        icon.setHudState(false, listening || speaking || pendingSrStart)
         params.width = dp(76f)
         params.height = dp(76f)
         if (params.x > sw - dp(80f)) params.x = sw - dp(92f)
@@ -94,13 +116,13 @@ class FloatingAssistantService : Service() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
         sr = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(p0: Bundle?) { listening = true; icon.alpha = 0.7f }
+                override fun onReadyForSpeech(p0: Bundle?) { listening = true; icon.alpha = 0.7f; updateHudAnimation() }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(p0: Float) {}
                 override fun onBufferReceived(p0: ByteArray?) {}
-                override fun onEndOfSpeech() { listening = false; icon.alpha = 1f }
-                override fun onError(p0: Int) { listening = false; icon.alpha = 1f }
-                override fun onResults(b: Bundle?) { listening = false; icon.alpha = 1f; b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { runCmd(it) } }
+                override fun onEndOfSpeech() { listening = false; icon.alpha = 1f; updateHudAnimation() }
+                override fun onError(p0: Int) { listening = false; icon.alpha = 1f; updateHudAnimation() }
+                override fun onResults(b: Bundle?) { listening = false; icon.alpha = 1f; updateHudAnimation(); b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { runCmd(it) } }
                 override fun onPartialResults(p0: Bundle?) {}
                 override fun onEvent(p0: Int, p1: Bundle?) {}
             })
@@ -154,6 +176,7 @@ class FloatingAssistantService : Service() {
         try {
             if (routeAudioToBluetooth()) {
                 pendingSrStart = true
+                updateHudAnimation()
                 h.postDelayed(scoStartTimeout, 3000)
                 if (Build.VERSION.SDK_INT >= 31 && bluetoothHeadset()?.type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
                     h.removeCallbacks(scoStartTimeout)
@@ -170,7 +193,7 @@ class FloatingAssistantService : Service() {
         try { sr?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU") }) }
         catch (e: Exception) { android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e) }
     }
-    private fun stopSr() { pendingSrStart = false; h.removeCallbacks(scoStartTimeout); listening = false; icon.alpha = 1f; try { sr?.stopListening() } catch (_: Exception) {} }
+    private fun stopSr() { pendingSrStart = false; h.removeCallbacks(scoStartTimeout); listening = false; icon.alpha = 1f; updateHudAnimation(); try { sr?.stopListening() } catch (_: Exception) {} }
     private fun say(t: String) { h.post { tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "j") } }
     private fun app(pkg: String, n: String) { val i = packageManager.getLaunchIntentForPackage(pkg); if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); say("$n megnyitása.") } else say("$n nincs telepítve.") }
     private fun torch(on: Boolean) { try { val cm = getSystemService(CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], on); say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.") } catch (_: Exception) { say("Zseblámpa hiba.") } }
@@ -202,32 +225,112 @@ class FloatingAssistantService : Service() {
         thread {
             try {
                 if (hist.size >= 6) hist.removeFirst(); hist.addLast("F: $q")
-                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
-                val u = URL(if (k.startsWith("AIza")) "$endpoint?key=$k" else endpoint)
-                val conn = (u.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                    if (!k.startsWith("AIza")) setRequestProperty("x-goog-api-key", k)
-                    doOutput = true
-                }
                 val prompt = "Te J.A.R.V.I.S. magyar hangasszisztens vagy. Válaszolj 2 rövid, tömör mondatban, formázás nélkül.\n" + hist.joinToString("\n")
-                val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
-                conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-                val responseCode = conn.responseCode
-                if (responseCode !in 200..299) {
-                    val response = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                    val message = "Gemini HTTP $responseCode: $response"
-                    android.util.Log.e("J.A.R.V.I.S.", message)
-                    h.post { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
-                    say("Gemini HTTP hiba: $responseCode")
-                    return@thread
-                }
-                val ans = JSONObject(conn.inputStream.bufferedReader().readText()).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text").replace("*", "").trim()
+                val ans = GeminiApi.generateContent(k, prompt).replace("*", "").trim()
                 if (hist.size >= 6) hist.removeFirst(); hist.addLast("A: $ans"); say(ans)
             } catch (e: Exception) {
-                android.util.Log.e("J.A.R.V.I.S.", "Gemini kérés sikertelen", e)
+                android.util.Log.e("J.A.R.V.I.S.", "Gemini kérés sikertelen az összes modellen", e)
+                h.post { Toast.makeText(this, e.message ?: "Gemini kérés sikertelen.", Toast.LENGTH_LONG).show() }
                 say("Gemini hiba, ellenőrizd a netet vagy a kulcsot.")
             }
+        }
+    }
+    private fun updateHudAnimation() {
+        if (::icon.isInitialized) icon.setHudState(docked, listening || speaking || pendingSrStart)
+    }
+    private inner class ReactorHudView(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var isDocked = true
+        private var pulse = 0.5f
+        private val pulseAnimator = ValueAnimator.ofFloat(0.35f, 1f).apply {
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            duration = 1_700L
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener {
+                pulse = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+
+        init {
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        }
+
+        fun setHudState(docked: Boolean, active: Boolean) {
+            isDocked = docked
+            pulseAnimator.duration = if (active) 620L else 1_700L
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width / 2f
+            val cy = height / 2f
+            val cyan = Color.rgb(0, 229, 255)
+            val alpha = (150 + 105 * pulse).toInt().coerceIn(0, 255)
+
+            paint.style = Paint.Style.FILL
+            paint.shader = RadialGradient(
+                cx, cy, dp(if (isDocked) 24f else 42f) * (0.72f + pulse * 0.45f),
+                intArrayOf(Color.argb(alpha, 0, 229, 255), Color.argb(0, 0, 229, 255)),
+                null,
+                Shader.TileMode.CLAMP
+            )
+            if (isDocked) {
+                val track = RectF(cx - dp(4f), dp(8f).toFloat(), cx + dp(4f), height - dp(8f).toFloat())
+                paint.shader = null
+                paint.color = Color.argb(65, 0, 229, 255)
+                canvas.drawRoundRect(track, dp(5f).toFloat(), dp(5f).toFloat(), paint)
+                paint.shader = RadialGradient(
+                    cx, cy, dp(24f) * (0.72f + pulse * 0.45f),
+                    intArrayOf(Color.argb(alpha, 0, 229, 255), Color.argb(0, 0, 229, 255)),
+                    null, Shader.TileMode.CLAMP
+                )
+                canvas.drawCircle(cx, cy, dp(24f) * (0.72f + pulse * 0.45f), paint)
+                paint.shader = null
+                paint.color = Color.argb(alpha, 0, 229, 255)
+                canvas.drawRoundRect(
+                    RectF(cx - dp(2f), cy - dp(13f) * (0.75f + pulse * 0.35f), cx + dp(2f), cy + dp(13f) * (0.75f + pulse * 0.35f)),
+                    dp(3f).toFloat(), dp(3f).toFloat(), paint
+                )
+            } else {
+                val radius = min(width, height) * 0.45f
+                canvas.drawCircle(cx, cy, radius, paint)
+                paint.shader = null
+                paint.style = Paint.Style.STROKE
+                paint.strokeCap = Paint.Cap.ROUND
+                val rings = listOf(0.34f, 0.52f, 0.72f, 0.91f)
+                rings.forEachIndexed { index, scale ->
+                    paint.strokeWidth = dp(if (index == 2) 2f else 1f).toFloat()
+                    paint.color = Color.argb((alpha * (1f - index * 0.13f)).toInt(), 0, 229, 255)
+                    canvas.drawCircle(cx, cy, radius * scale, paint)
+                }
+                val bounds = RectF(cx - radius * 0.82f, cy - radius * 0.82f, cx + radius * 0.82f, cy + radius * 0.82f)
+                paint.strokeWidth = dp(2f).toFloat()
+                paint.color = Color.argb(alpha, 0, 229, 255)
+                canvas.drawArc(bounds, -65f, 105f, false, paint)
+                canvas.drawArc(bounds, 112f, 112f, false, paint)
+                canvas.drawArc(bounds, 245f, 55f, false, paint)
+                paint.style = Paint.Style.FILL
+                val coreRadius = radius * (0.17f + pulse * 0.035f)
+                paint.shader = RadialGradient(
+                    cx, cy, coreRadius * 1.8f,
+                    intArrayOf(Color.WHITE, cyan, Color.argb(0, 0, 229, 255)),
+                    floatArrayOf(0f, 0.42f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+                canvas.drawCircle(cx, cy, coreRadius * 1.8f, paint)
+                paint.shader = null
+                paint.color = Color.argb(alpha, 0, 229, 255)
+                canvas.drawCircle(cx, cy, coreRadius, paint)
+            }
+            paint.shader = null
+        }
+
+        fun stopAnimation() {
+            pulseAnimator.cancel()
         }
     }
     override fun onDestroy() {
@@ -243,6 +346,7 @@ class FloatingAssistantService : Service() {
         else { audioManager.isBluetoothScoOn = false; audioManager.stopBluetoothSco() }
         audioManager.mode = originalAudioMode
         audioManager.isSpeakerphoneOn = originalSpeakerphoneOn
+        icon.stopAnimation()
         try { wm.removeView(root); wm.removeView(closeBtn) } catch (_: Exception) {}
         sr?.destroy(); tts?.shutdown(); super.onDestroy()
     }
