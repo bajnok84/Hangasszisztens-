@@ -88,9 +88,9 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
 
         // 1. Vekony el-csik (kb. 1.5 mm szeles, 2.5 cm hosszu)
         edgeStrip = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(4f), dp(145f))
+            layoutParams = FrameLayout.LayoutParams(dp(14f), dp(145f))
             background = GradientDrawable().apply {
-                cornerRadius = dp(4f).toFloat()
+                cornerRadius = dp(14f).toFloat()
                 setColor(Color.parseColor("#CC00E5FF"))
                 setStroke(1, Color.parseColor("#80E0F7FA"))
             }
@@ -108,7 +108,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
 
         params = WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, flag, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = screenWidth - dp(4f)
+            x = screenWidth - dp(14f)
             y = screenHeight / 3
         }
         windowManager.addView(rootContainer, params)
@@ -190,7 +190,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
         if (startMic) {
             toggleListening()
         } else {
-            handler.postDelayed(autoDockRunnable, 3000)
+            handler.postDelayed(autoDockRunnable, 9999999)
         }
     }
 
@@ -198,7 +198,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
         isDocked = true
         icon.visibility = View.GONE
         edgeStrip.visibility = View.VISIBLE
-        params.x = if (isRightEdge) screenWidth - dp(4f) else 0
+        params.x = if (isRightEdge) screenWidth - dp(14f) else 0
         windowManager.updateViewLayout(rootContainer, params)
     }
 
@@ -226,7 +226,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                 override fun onEndOfSpeech() {
                     icon.clearColorFilter()
                     isListening = false
-                    handler.postDelayed(autoDockRunnable, 2500)
+                    handler.postDelayed(autoDockRunnable, 9999999)
                 }
                 override fun onError(err: Int) {
                     icon.clearColorFilter()
@@ -234,12 +234,12 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                     if (err != SpeechRecognizer.ERROR_NO_MATCH && err != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                         Toast.makeText(this@FloatingAssistantService, "Mikrofon hiba ($err)", Toast.LENGTH_SHORT).show()
                     }
-                    handler.postDelayed(autoDockRunnable, 1500)
+                    handler.postDelayed(autoDockRunnable, 9999999)
                 }
                 override fun onResults(results: Bundle?) {
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
                     handleVoiceCommand(text)
-                    handler.postDelayed(autoDockRunnable, 3000)
+                    handler.postDelayed(autoDockRunnable, 9999999)
                 }
                 override fun onPartialResults(p: Bundle?) {}
                 override fun onEvent(t: Int, p: Bundle?) {}
