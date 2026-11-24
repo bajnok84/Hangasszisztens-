@@ -1,31 +1,65 @@
 package com.sajat.hangasszisztens
 import android.app.*; import android.content.*; import android.graphics.*; import android.graphics.drawable.GradientDrawable; import android.hardware.camera2.CameraManager; import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.view.*; import android.widget.*; import androidx.core.app.NotificationCompat; import org.json.*; import java.net.*; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
+import androidx.core.content.ContextCompat
 class FloatingAssistantService : Service() {
     private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ImageView; private lateinit var closeBtn: TextView
     private lateinit var params: WindowManager.LayoutParams; private lateinit var closeParams: WindowManager.LayoutParams
     private var sr: SpeechRecognizer? = null; private var tts: TextToSpeech? = null; private val h = Handler(Looper.getMainLooper()); private val hist = ArrayDeque<String>()
+    private lateinit var audioManager: AudioManager
+    private var mediaSession: MediaSession? = null
+    private var pendingSrStart = false
+    private var originalAudioMode = AudioManager.MODE_NORMAL
+    private var originalSpeakerphoneOn = false
+    private var originalCommunicationDevice: AudioDeviceInfo? = null
     private var docked = true; private var right = true; private var listening = false; private var sw = 1080; private var sh = 2400
+    private val scoStartTimeout = Runnable {
+        if (pendingSrStart) {
+            pendingSrStart = false
+            beginSr()
+        }
+    }
+    private val scoReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_ERROR) == AudioManager.SCO_AUDIO_STATE_CONNECTED && pendingSrStart) {
+                h.removeCallbacks(scoStartTimeout)
+                pendingSrStart = false
+                beginSr()
+            }
+        }
+    }
     private fun dp(v: Float) = (v * resources.displayMetrics.density).toInt()
     override fun onBind(i: Intent?): IBinder? = null
     override fun onCreate() {
         super.onCreate()
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        originalAudioMode = audioManager.mode
+        originalSpeakerphoneOn = audioManager.isSpeakerphoneOn
+        originalCommunicationDevice = if (Build.VERSION.SDK_INT >= 31) audioManager.communicationDevice else null
+        ContextCompat.registerReceiver(this, scoReceiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED), ContextCompat.RECEIVER_NOT_EXPORTED)
         val ch = "jarvis_ch"; if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(ch, "J.A.R.V.I.S.", NotificationManager.IMPORTANCE_LOW))
         startForeground(1, NotificationCompat.Builder(this, ch).setContentTitle("J.A.R.V.I.S. aktív").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
         wm = getSystemService(WINDOW_SERVICE) as WindowManager; sw = resources.displayMetrics.widthPixels; sh = resources.displayMetrics.heightPixels
-        tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts?.language = Locale("hu", "HU") }
+        tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) { tts?.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()); tts?.language = Locale("hu", "HU") } }
         root = FrameLayout(this); icon = ImageView(this); root.addView(icon)
         val t = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
         params = WindowManager.LayoutParams(dp(14f), dp(145f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = sw - dp(14f); y = sh / 3 }
         closeBtn = TextView(this).apply { text = "✕"; textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#E53935")) }; visibility = View.GONE }
         closeParams = WindowManager.LayoutParams(dp(58f), dp(58f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(48f) }
-        wm.addView(closeBtn, closeParams); wm.addView(root, params); dock(); touch(); initSr()
+        wm.addView(closeBtn, closeParams); wm.addView(root, params); dock(); touch(); initSr(); initMediaSession()
     }
-    private fun dock() { docked = true; icon.setImageDrawable(GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#00E5FF")); setStroke(dp(1f), Color.WHITE) }); params.width = dp(14f); params.height = dp(145f); params.x = if (right) sw - dp(14f) else
+    private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#770A0F1C")); setStroke(dp(1f), Color.parseColor("#8800E5FF")) }
+    private fun dock() { docked = true; root.background = null; icon.setImageDrawable(GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#6600E5FF")); setStroke(dp(1f), Color.parseColor("#8800E5FF")) }); params.width = dp(14f); params.height = dp(145f); params.x = if (right) sw - dp(14f) else
 
 
 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
     private fun undock() {
         docked = false
+        root.background = hudBackground()
         icon.setImageResource(R.drawable.jarvis_3d_icon)
         params.width = dp(76f)
         params.height = dp(76f)
@@ -72,8 +106,71 @@ class FloatingAssistantService : Service() {
             })
         }
     }
-    private fun startSr() { tts?.stop(); try { sr?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU") }) } catch (_: Exception) {} }
-    private fun stopSr() { listening = false; icon.alpha = 1f; try { sr?.stopListening() } catch (_: Exception) {} }
+    private fun initMediaSession() {
+        mediaSession = MediaSession(this, "J.A.R.V.I.S.").apply {
+            setCallback(object : MediaSession.Callback() {
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    if (event != null && event.keyCode in listOf(KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY) && event.action == KeyEvent.ACTION_DOWN) {
+                        startSr()
+                        return true
+                    }
+                    return super.onMediaButtonEvent(mediaButtonIntent)
+                }
+                override fun onPlay() = startSr()
+                override fun onPause() = startSr()
+            })
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE).setState(PlaybackState.STATE_PAUSED, 0, 0f).build())
+            isActive = true
+        }
+    }
+    private fun bluetoothHeadset(): AudioDeviceInfo? {
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) != android.content.pm.PackageManager.PERMISSION_GRANTED) return null
+            return audioManager.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+        }
+        return audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+    }
+    private fun routeAudioToBluetooth(): Boolean {
+        val device = bluetoothHeadset() ?: return false
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        audioManager.isSpeakerphoneOn = false
+        if (Build.VERSION.SDK_INT >= 31 && device.type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+            if (!audioManager.setCommunicationDevice(device)) {
+                audioManager.mode = originalAudioMode
+                audioManager.isSpeakerphoneOn = originalSpeakerphoneOn
+                return false
+            }
+        } else {
+            audioManager.startBluetoothSco()
+            audioManager.isBluetoothScoOn = true
+        }
+        return true
+    }
+    private fun startSr() {
+        if (listening || pendingSrStart) return
+        tts?.stop()
+        try {
+            if (routeAudioToBluetooth()) {
+                pendingSrStart = true
+                h.postDelayed(scoStartTimeout, 3000)
+                if (Build.VERSION.SDK_INT >= 31 && bluetoothHeadset()?.type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                    h.removeCallbacks(scoStartTimeout)
+                    pendingSrStart = false
+                    beginSr()
+                }
+            } else beginSr()
+        } catch (e: SecurityException) {
+            android.util.Log.e("J.A.R.V.I.S.", "Bluetooth hangútvonal nem érhető el", e)
+            beginSr()
+        }
+    }
+    private fun beginSr() {
+        try { sr?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU") }) }
+        catch (e: Exception) { android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e) }
+    }
+    private fun stopSr() { pendingSrStart = false; h.removeCallbacks(scoStartTimeout); listening = false; icon.alpha = 1f; try { sr?.stopListening() } catch (_: Exception) {} }
     private fun say(t: String) { h.post { tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "j") } }
     private fun app(pkg: String, n: String) { val i = packageManager.getLaunchIntentForPackage(pkg); if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); say("$n megnyitása.") } else say("$n nincs telepítve.") }
     private fun torch(on: Boolean) { try { val cm = getSystemService(CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], on); say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.") } catch (_: Exception) { say("Zseblámpa hiba.") } }
@@ -105,7 +202,7 @@ class FloatingAssistantService : Service() {
         thread {
             try {
                 if (hist.size >= 6) hist.removeFirst(); hist.addLast("F: $q")
-                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
                 val u = URL(if (k.startsWith("AIza")) "$endpoint?key=$k" else endpoint)
                 val conn = (u.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -133,5 +230,20 @@ class FloatingAssistantService : Service() {
             }
         }
     }
-    override fun onDestroy() { try { wm.removeView(root); wm.removeView(closeBtn) } catch (_: Exception) {}; sr?.destroy(); tts?.shutdown(); super.onDestroy() }
+    override fun onDestroy() {
+        pendingSrStart = false
+        h.removeCallbacks(scoStartTimeout)
+        try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("J.A.R.V.I.S.", "SCO receiver was already unregistered", e) }
+        mediaSession?.run { isActive = false; release() }
+        mediaSession = null
+        if (Build.VERSION.SDK_INT >= 31) {
+            val previousDevice = originalCommunicationDevice
+            if (previousDevice == null) audioManager.clearCommunicationDevice() else audioManager.setCommunicationDevice(previousDevice)
+        }
+        else { audioManager.isBluetoothScoOn = false; audioManager.stopBluetoothSco() }
+        audioManager.mode = originalAudioMode
+        audioManager.isSpeakerphoneOn = originalSpeakerphoneOn
+        try { wm.removeView(root); wm.removeView(closeBtn) } catch (_: Exception) {}
+        sr?.destroy(); tts?.shutdown(); super.onDestroy()
+    }
 }

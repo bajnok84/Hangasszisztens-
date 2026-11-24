@@ -7,7 +7,11 @@ class MainActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 56, 48, 56); setBackgroundColor(Color.parseColor("#0A0F1C")) }
         fun btn(t: String, c: String, f: () -> Unit) = Button(this).apply { text = t; setTextColor(Color.WHITE); background = GradientDrawable().apply { cornerRadius = 20f; setColor(Color.parseColor(c)) }; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 12, 0, 12) }; setOnClickListener { f() } }
         root.addView(TextView(this).apply { text = "J.A.R.V.I.S. Vezérlőpult"; textSize = 22f; setTextColor(Color.parseColor("#00E5FF")); gravity = Gravity.CENTER })
-        root.addView(btn("1. Mikrofon + Értesítés", "#1E293B") { ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, "android.permission.POST_NOTIFICATIONS"), 1) })
+        root.addView(btn("1. Mikrofon + Bluetooth + Értesítés", "#1E293B") {
+            val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS, "android.permission.POST_NOTIFICATIONS")
+            if (Build.VERSION.SDK_INT >= 31) permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 1)
+        })
         root.addView(btn("2. Lebegő ablak engedély", "#1E293B") { if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
         val inp = EditText(this).apply { hint = "Gemini API-kulcs"; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); setText(p.getString("gemini_key", "")); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD }
         root.addView(inp)
@@ -19,7 +23,7 @@ class MainActivity : AppCompatActivity() {
             status.text = "Mentve! Kapcsolat tesztelése..."
             thread {
                 try {
-                    val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                    val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
                     val u = URL(if (k.startsWith("AIza")) "$endpoint?key=$k" else endpoint)
                     val conn = (u.openConnection() as HttpURLConnection).apply {
                         requestMethod = "POST"
