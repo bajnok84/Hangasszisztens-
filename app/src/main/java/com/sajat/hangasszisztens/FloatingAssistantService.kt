@@ -41,7 +41,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
     private lateinit var params: WindowManager.LayoutParams
 
     private val autoDockRunnable = Runnable {
-        if (!isListening && !isDocked) dockToEdge()
+        if (!isListening && !isDocked) if (e.rawX < 70 || e.rawX > screenWidth - 70) dockToEdge()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -141,7 +141,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                     MotionEvent.ACTION_MOVE -> {
                         val dx = (e.rawX - itx).toInt()
                         val dy = (e.rawY - ity).toInt()
-                        if (abs(dx) > 15 || abs(dy) > 15) {
+                        if (abs(dx) > 35 || abs(dy) > 15) {
                             if (!isDragging) {
                                 isDragging = true
                                 expandIcon(startMic = false)
@@ -171,7 +171,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                             stopSelf()
                         } else {
                             isRightEdge = (e.rawX >= screenWidth / 2f)
-                            dockToEdge()
+                            if (e.rawX < 70 || e.rawX > screenWidth - 70) dockToEdge()
                         }
                         return true
                     }
@@ -190,11 +190,11 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
         if (startMic) {
             toggleListening()
         } else {
-            handler.postDelayed(autoDockRunnable, 9999999)
+            handler.postDelayed(autoDockRunnable, 86400000)
         }
     }
 
-    private fun dockToEdge() {
+    private fun if (e.rawX < 70 || e.rawX > screenWidth - 70) dockToEdge() {
         isDocked = true
         icon.visibility = View.GONE
         edgeStrip.visibility = View.VISIBLE
@@ -226,7 +226,7 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                 override fun onEndOfSpeech() {
                     icon.clearColorFilter()
                     isListening = false
-                    handler.postDelayed(autoDockRunnable, 9999999)
+                    handler.postDelayed(autoDockRunnable, 86400000)
                 }
                 override fun onError(err: Int) {
                     icon.clearColorFilter()
@@ -234,12 +234,12 @@ class FloatingAssistantService : Service(), TextToSpeech.OnInitListener {
                     if (err != SpeechRecognizer.ERROR_NO_MATCH && err != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                         Toast.makeText(this@FloatingAssistantService, "Mikrofon hiba ($err)", Toast.LENGTH_SHORT).show()
                     }
-                    handler.postDelayed(autoDockRunnable, 9999999)
+                    handler.postDelayed(autoDockRunnable, 86400000)
                 }
                 override fun onResults(results: Bundle?) {
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
                     handleVoiceCommand(text)
-                    handler.postDelayed(autoDockRunnable, 9999999)
+                    handler.postDelayed(autoDockRunnable, 86400000)
                 }
                 override fun onPartialResults(p: Bundle?) {}
                 override fun onEvent(t: Int, p: Bundle?) {}
