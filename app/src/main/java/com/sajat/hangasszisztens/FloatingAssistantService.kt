@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 class FloatingAssistantService : Service() {
     companion object {
         const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
+        const val ACTION_MACRO_COMMAND = "com.sajat.hangasszisztens.MACRO_COMMAND"
     }
 
     private enum class HudState { IDLE, LISTENING, THINKING, SPEAKING }
@@ -24,6 +25,8 @@ class FloatingAssistantService : Service() {
     private lateinit var audioManager: AudioManager
     private var mediaSession: MediaSession? = null
     private var pendingSrStart = false
+    private var recognitionActive = false
+    private var consecutiveRecognitionErrors = 0
     private var activeListening = false
     private var thinking = false
     private var recognizerSoundsMuted = false
@@ -233,14 +236,17 @@ class FloatingAssistantService : Service() {
             override fun onError(p0: Int) {
                 if (sr !== recognizer) return
                 listening = false
+                recognitionActive = false
                 icon.alpha = 1f
                 updateHudAnimation()
                 android.util.Log.w("J.A.R.V.I.S.", "A hangfelismerés leállt hibával: $p0")
-                scheduleWakeListening()
+                scheduleRecognitionRetry()
             }
             override fun onResults(b: Bundle?) {
                 if (sr !== recognizer) return
                 listening = false
+                recognitionActive = false
+                consecutiveRecognitionErrors = 0
                 icon.alpha = 1f
                 updateHudAnimation()
                 val result = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
@@ -308,7 +314,7 @@ class FloatingAssistantService : Service() {
         return true
     }
     private fun startSr() {
-        if (listening || pendingSrStart) return
+        if (listening || recognitionActive || pendingSrStart) return
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés nem indítható mikrofonengedély nélkül")
             return
@@ -343,6 +349,7 @@ class FloatingAssistantService : Service() {
         sr?.destroy()
         sr = null
         listening = false
+        recognitionActive = false
         initSr()
         startSr()
     }
@@ -381,14 +388,24 @@ class FloatingAssistantService : Service() {
         startSr()
     }
 
-    private fun scheduleWakeListening(recreateRecognizer: Boolean = false) {
+    private fun scheduleWakeListening(
+        recreateRecognizer: Boolean = false,
+        delayMillis: Long = 700L
+    ) {
         h.postDelayed({
             if (tts?.isSpeaking == true) {
                 restartAfterSpeech = true
             } else {
                 if (recreateRecognizer) restartSr() else startSr()
             }
-        }, 700L)
+        }, delayMillis)
+    }
+
+    private fun scheduleRecognitionRetry() {
+        val delayMillis = (700L * (1L shl consecutiveRecognitionErrors.coerceAtMost(5)))
+            .coerceAtMost(20_000L)
+        consecutiveRecognitionErrors++
+        scheduleWakeListening(delayMillis = delayMillis)
     }
 
     private fun finishSpeech() {
@@ -413,13 +430,18 @@ class FloatingAssistantService : Service() {
             listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
                 audioManager.adjustStreamVolume(it, AudioManager.ADJUST_MUTE, 0)
             }
+            recognitionActive = true
             recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU")
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             })
         }
-        catch (e: Exception) { android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e) }
+        catch (e: Exception) {
+            recognitionActive = false
+            android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e)
+            scheduleRecognitionRetry()
+        }
     }
     private fun say(t: String) {
         h.post {
@@ -480,7 +502,7 @@ class FloatingAssistantService : Service() {
                     say("Mondd el, melyik makrót futtassam.")
                 } else {
                     sendBroadcast(
-                        Intent("com.sajat.hangasszisztens.MACRO_COMMAND")
+                        Intent(ACTION_MACRO_COMMAND)
                             .putExtra("command", command)
                     )
                     say("Makró indítása: $command")
@@ -517,15 +539,75 @@ class FloatingAssistantService : Service() {
                 }
             }
             "tárcsáz" in c || "hívd" in c -> { startActivity(Intent(Intent.ACTION_DIAL).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); say("Tárcsázó.") }
-            "időzítő" in c -> { val m = Regex("\\d+").find(c)?.value?.toIntOrNull() ?: 5; try { startActivity(Intent(AlarmClock.ACTION_SET_TIMER).apply { putExtra(AlarmClock.EXTRA_LENGTH, m * 60); putExtra(AlarmClock.EXTRA_SKIP_UI, true); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); say("$m perces időzítő.") } catch (_: Exception) {} }
-            "ébresztő" in c || "ébressz" in c -> { val n = Regex("\\d+").findAll(c).map { it.value.toInt() }.toList(); try { startActivity(Intent(AlarmClock.ACTION_SET_ALARM).apply { putExtra(AlarmClock.EXTRA_HOUR, n.getOrNull(0) ?: 7); putExtra(AlarmClock.EXTRA_MINUTES, n.getOrNull(1) ?: 0); putExtra(AlarmClock.EXTRA_SKIP_UI, true); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); say("Ébresztő beállítva.") } catch (_: Exception) {} }
-            "emlékeztess" in c || "jegyzet" in c -> { val t = raw.replace(Regex("(?i)(emlékeztess|hogy|jegyzet|:)"), "").trim().ifEmpty { raw }; try { startActivity(Intent(Intent.ACTION_INSERT).apply { data = CalendarContract.Events.CONTENT_URI; putExtra(CalendarContract.Events.TITLE, t); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); say("Emlékeztető: $t") } catch (_: Exception) {} }
+            "időzítő" in c -> {
+                val minuteToken = Regex("\\d+").find(c)?.value
+                val minutes = if (minuteToken == null) 5L else minuteToken.toLongOrNull()
+                if (minutes == null || minutes !in 1L..1_440L) {
+                    say("Adj meg egy időzítőt 1 és 1440 perc között.")
+                } else {
+                    try {
+                        startActivity(Intent(AlarmClock.ACTION_SET_TIMER).apply {
+                            putExtra(AlarmClock.EXTRA_LENGTH, (minutes * 60).toInt())
+                            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                        say("$minutes perces időzítő.")
+                    } catch (error: Exception) {
+                        android.util.Log.e("J.A.R.V.I.S.", "Az időzítő nem indítható", error)
+                        say("Az időzítőt nem sikerült beállítani.")
+                    }
+                }
+            }
+            "ébresztő" in c || "ébressz" in c -> {
+                val numberTokens = Regex("\\d+").findAll(c).map { it.value }.toList()
+                val numbers = numberTokens.mapNotNull { it.toIntOrNull() }
+                val hour = numbers.getOrNull(0) ?: 7
+                val minute = numbers.getOrNull(1) ?: 0
+                if (numberTokens.size != numbers.size || hour !in 0..23 || minute !in 0..59) {
+                    say("Az ébresztő időpontja érvénytelen.")
+                } else {
+                    try {
+                        startActivity(Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                            putExtra(AlarmClock.EXTRA_HOUR, hour)
+                            putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                        say("Ébresztő beállítva.")
+                    } catch (error: Exception) {
+                        android.util.Log.e("J.A.R.V.I.S.", "Az ébresztő nem indítható", error)
+                        say("Az ébresztőt nem sikerült beállítani.")
+                    }
+                }
+            }
+            "emlékeztess" in c || "jegyzet" in c -> {
+                val title = raw.replace(Regex("(?i)(emlékeztess|hogy|jegyzet|:)"), "")
+                    .trim()
+                    .ifEmpty { raw }
+                try {
+                    startActivity(Intent(Intent.ACTION_INSERT).apply {
+                        data = CalendarContract.Events.CONTENT_URI
+                        putExtra(CalendarContract.Events.TITLE, title)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                    say("Emlékeztető: $title")
+                } catch (error: Exception) {
+                    android.util.Log.e("J.A.R.V.I.S.", "Az emlékeztető nem indítható", error)
+                    say("Az emlékeztetőt nem sikerült megnyitni.")
+                }
+            }
             "keress rá" in c -> { val q = raw.replace(Regex("(?i)(keress rá|:)"), "").trim(); startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=" + Uri.encode(q))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); say("Keresés: $q") }
             else -> askAi(raw)
         }
     }
     private fun askAi(q: String) {
-        val k = getSharedPreferences("jarvis_prefs", MODE_PRIVATE).getString("gemini_key", "") ?: ""
+        val k = try {
+            ApiKeyStore.read(this).orEmpty()
+        } catch (error: Exception) {
+            android.util.Log.e("J.A.R.V.I.S.", "A mentett API-kulcs nem olvasható", error)
+            say("A mentett API-kulcs nem olvasható. Nyisd meg a vezérlőpultot.")
+            return
+        }
         if (k.isEmpty()) { say("Ezt hallottam: $q. Add meg az API-kulcsot a vezérlőpulton."); return }
         thinking = true
         updateHudAnimation()

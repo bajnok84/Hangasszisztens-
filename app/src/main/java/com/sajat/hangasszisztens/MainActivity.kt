@@ -1,6 +1,8 @@
 package com.sajat.hangasszisztens
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -27,6 +29,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import kotlin.concurrent.thread
 
@@ -39,7 +42,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val preferences = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#060B19"))
         }
@@ -103,6 +105,32 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, dp(20))
         })
 
+        content.addView(button(
+            "VERZIÓ ${BuildConfig.VERSION_NAME} · FRISSÍTÉSI NAPLÓ",
+            borderColor = Color.parseColor("#00E5FF")
+        ) {
+            AlertDialog.Builder(this)
+                .setTitle("Frissítési napló · ${BuildConfig.VERSION_NAME}")
+                .setMessage(
+                    "• Az API-kulcs titkosított tárolást kapott, és kimarad a biztonsági mentésekből.\n\n" +
+                        "• A hangfelismerés párhuzamos indítás elleni védelmet és fokozatos újrapróbálkozást kapott.\n\n" +
+                        "• Az időzítő és ébresztő ellenőrzi a megadott értékeket, a hibákról magyar visszajelzést ad.\n\n" +
+                        "• A headsetgomb-vevő már nem érhető el közvetlenül külső alkalmazások számára."
+                )
+                .setPositiveButton("MAKRÓ-INTEGRÁCIÓ") { _, _ ->
+                    showMacroIntegrationInfo()
+                }
+                .setNegativeButton("BEZÁRÁS", null)
+                .show()
+        })
+
+        content.addView(button(
+            "MAKRÓ BROADCAST BEÁLLÍTÁSA",
+            borderColor = Color.parseColor("#00E5FF")
+        ) {
+            showMacroIntegrationInfo()
+        })
+
         content.addView(button("1. MIKROFON + BLUETOOTH + ÉRTESÍTÉS") {
             ActivityCompat.requestPermissions(
                 this,
@@ -129,7 +157,14 @@ class MainActivity : AppCompatActivity() {
             setHintTextColor(Color.parseColor("#91A7B8"))
             setTextColor(Color.WHITE)
             setShadowLayer(dp(1).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
-            setText(preferences.getString("gemini_key", ""))
+            val savedKey = try {
+                ApiKeyStore.read(this@MainActivity)
+            } catch (error: Exception) {
+                android.util.Log.e("J.A.R.V.I.S.", "A mentett API-kulcs nem olvasható", error)
+                Toast.makeText(this@MainActivity, "A mentett API-kulcs nem olvasható.", Toast.LENGTH_LONG).show()
+                null
+            }
+            setText(savedKey)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
             background = GradientDrawable().apply {
                 cornerRadius = dp(12).toFloat()
@@ -159,7 +194,13 @@ class MainActivity : AppCompatActivity() {
                 status.text = "Hiba: Érvénytelen Gemini API-kulcs."
                 return@button
             }
-            preferences.edit().putString("gemini_key", key).apply()
+            try {
+                ApiKeyStore.write(this, key)
+            } catch (error: Exception) {
+                android.util.Log.e("J.A.R.V.I.S.", "Az API-kulcs mentése sikertelen", error)
+                status.text = "Hiba: az API-kulcs biztonságos mentése sikertelen."
+                return@button
+            }
             status.text = "Mentve! Kapcsolat tesztelése..."
             thread {
                 try {
@@ -194,6 +235,30 @@ class MainActivity : AppCompatActivity() {
             addView(content)
         }, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+    }
+
+    private fun showMacroIntegrationInfo() {
+        val action = FloatingAssistantService.ACTION_MACRO_COMMAND
+        AlertDialog.Builder(this)
+            .setTitle("Makró broadcast")
+            .setMessage(
+                "A Hangasszisztens nem tartalmaz beépített makró-fogadót. " +
+                    "A „makró <parancs>” hangutasítás ezt a broadcastot küldi ki:\n\n" +
+                    "Esemény: $action\n" +
+                    "Extra neve: command\n" +
+                    "Extra típusa: szöveg\n\n" +
+                    "A fogadó automatizáló alkalmazásban erre az eseményre kell " +
+                    "fogadót beállítani, amely a „command” értéket használja. " +
+                    "A projektben nincs megadva célalkalmazás, ezért külső makrót " +
+                    "nem lehet automatikusan elindítani vagy konfigurálni."
+            )
+            .setNeutralButton("ESEMÉNY MÁSOLÁSA") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Makró broadcast", action))
+                Toast.makeText(this, "A broadcast neve a vágólapra került.", Toast.LENGTH_SHORT).show()
+            }
+            .setPositiveButton("BEZÁRÁS", null)
+            .show()
     }
 
     private fun startupPermissions(): List<String> = buildList {
