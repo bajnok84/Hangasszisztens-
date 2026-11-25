@@ -8,12 +8,17 @@ import android.media.session.PlaybackState
 import android.speech.tts.UtteranceProgressListener
 import androidx.core.content.ContextCompat
 class FloatingAssistantService : Service() {
+    companion object {
+        const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
+    }
+
     private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ReactorHudView; private lateinit var closeBtn: TextView
     private lateinit var params: WindowManager.LayoutParams; private lateinit var closeParams: WindowManager.LayoutParams
     private var sr: SpeechRecognizer? = null; private var tts: TextToSpeech? = null; private val h = Handler(Looper.getMainLooper()); private val hist = ArrayDeque<String>()
     private lateinit var audioManager: AudioManager
     private var mediaSession: MediaSession? = null
     private var pendingSrStart = false
+    private var scoReceiverRegistered = false
     private var originalAudioMode = AudioManager.MODE_NORMAL
     private var originalSpeakerphoneOn = false
     private var originalCommunicationDevice: AudioDeviceInfo? = null
@@ -37,15 +42,43 @@ class FloatingAssistantService : Service() {
     }
     private fun dp(v: Float) = (v * resources.displayMetrics.density).toInt()
     override fun onBind(i: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!Settings.canDrawOverlays(this) ||
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            android.util.Log.e("J.A.R.V.I.S.", "A lebegő ablak vagy a mikrofon engedélye hiányzik")
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_START_LISTENING) restartSr()
+        return START_STICKY
+    }
+
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         originalAudioMode = audioManager.mode
         originalSpeakerphoneOn = audioManager.isSpeakerphoneOn
-        originalCommunicationDevice = if (Build.VERSION.SDK_INT >= 31) audioManager.communicationDevice else null
-        ContextCompat.registerReceiver(this, scoReceiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        originalCommunicationDevice = if (
+            Build.VERSION.SDK_INT >= 31 &&
+            checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) audioManager.communicationDevice else null
         val ch = "jarvis_ch"; if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(ch, "J.A.R.V.I.S.", NotificationManager.IMPORTANCE_LOW))
         startForeground(1, NotificationCompat.Builder(this, ch).setContentTitle("J.A.R.V.I.S. aktív").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
+        if (!Settings.canDrawOverlays(this) ||
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            android.util.Log.e("J.A.R.V.I.S.", "Indítás megszakítva: hiányzó lebegő ablak- vagy mikrofonengedély")
+            stopSelf()
+            return
+        }
+        ContextCompat.registerReceiver(this, scoReceiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        scoReceiverRegistered = true
         wm = getSystemService(WINDOW_SERVICE) as WindowManager; sw = resources.displayMetrics.widthPixels; sh = resources.displayMetrics.heightPixels
         tts = TextToSpeech(this) {
             if (it == TextToSpeech.SUCCESS) {
@@ -106,7 +139,7 @@ class FloatingAssistantService : Service() {
                     if (drag) {
                         if (e.rawY > sh - dp(125f) && abs(e.rawX - sw / 2f) < dp(75f)) stopSelf()
                         else if (e.rawX < 65 || e.rawX > sw - 65) { right = e.rawX >= sw / 2f; dock() }
-                    } else { tts?.stop(); if (docked) { undock(); startSr() } else if (listening) stopSr() else startSr() }
+                    } else { tts?.stop(); if (docked) undock(); restartSr() }
                     true
                 }
                 else -> false
@@ -114,37 +147,79 @@ class FloatingAssistantService : Service() {
         }
     }
     private fun initSr() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
-        sr = SpeechRecognizer.createSpeechRecognizer(this).apply {
-            setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(p0: Bundle?) { listening = true; icon.alpha = 0.7f; updateHudAnimation() }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(p0: Float) {}
-                override fun onBufferReceived(p0: ByteArray?) {}
-                override fun onEndOfSpeech() { listening = false; icon.alpha = 1f; updateHudAnimation() }
-                override fun onError(p0: Int) { listening = false; icon.alpha = 1f; updateHudAnimation() }
-                override fun onResults(b: Bundle?) { listening = false; icon.alpha = 1f; updateHudAnimation(); b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { runCmd(it) } }
-                override fun onPartialResults(p0: Bundle?) {}
-                override fun onEvent(p0: Int, p1: Bundle?) {}
-            })
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            android.util.Log.e("J.A.R.V.I.S.", "A készüléken nem érhető el hangfelismerő")
+            return
         }
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        sr = recognizer
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(p0: Bundle?) {
+                if (sr !== recognizer) return
+                listening = true
+                icon.alpha = 0.7f
+                updateHudAnimation()
+            }
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(p0: Float) {}
+            override fun onBufferReceived(p0: ByteArray?) {}
+            override fun onEndOfSpeech() {
+                if (sr !== recognizer) return
+                listening = false
+                icon.alpha = 1f
+                updateHudAnimation()
+            }
+            override fun onError(p0: Int) {
+                if (sr !== recognizer) return
+                listening = false
+                icon.alpha = 1f
+                updateHudAnimation()
+                android.util.Log.w("J.A.R.V.I.S.", "A hangfelismerés leállt hibával: $p0")
+            }
+            override fun onResults(b: Bundle?) {
+                if (sr !== recognizer) return
+                listening = false
+                icon.alpha = 1f
+                updateHudAnimation()
+                b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.let { runCmd(it) }
+            }
+            override fun onPartialResults(p0: Bundle?) {}
+            override fun onEvent(p0: Int, p1: Bundle?) {}
+        })
     }
     private fun initMediaSession() {
         mediaSession = MediaSession(this, "J.A.R.V.I.S.").apply {
             setCallback(object : MediaSession.Callback() {
                 override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
                     val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                    if (event != null && event.keyCode in listOf(KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY) && event.action == KeyEvent.ACTION_DOWN) {
-                        startSr()
+                    if (event != null && event.keyCode in listOf(
+                            KeyEvent.KEYCODE_CALL,
+                            KeyEvent.KEYCODE_HEADSETHOOK,
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                            KeyEvent.KEYCODE_MEDIA_PLAY,
+                            KeyEvent.KEYCODE_MEDIA_PAUSE
+                        ) && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        restartSr()
                         return true
                     }
                     return super.onMediaButtonEvent(mediaButtonIntent)
                 }
-                override fun onPlay() = startSr()
-                override fun onPause() = startSr()
+                override fun onPlay() = restartSr()
+                override fun onPause() = restartSr()
             })
             setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
-            setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE).setState(PlaybackState.STATE_PAUSED, 0, 0f).build())
+            val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON, null, this@FloatingAssistantService, MediaButtonReceiver::class.java)
+            setMediaButtonReceiver(
+                PendingIntent.getBroadcast(
+                    this@FloatingAssistantService,
+                    0,
+                    mediaButtonIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+            setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE).setState(PlaybackState.STATE_PAUSED, 0, 0f).build())
             isActive = true
         }
     }
@@ -173,6 +248,12 @@ class FloatingAssistantService : Service() {
     }
     private fun startSr() {
         if (listening || pendingSrStart) return
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés nem indítható mikrofonengedély nélkül")
+            return
+        }
+        if (sr == null) initSr()
+        if (sr == null) return
         tts?.stop()
         try {
             if (routeAudioToBluetooth()) {
@@ -190,11 +271,31 @@ class FloatingAssistantService : Service() {
             beginSr()
         }
     }
+
+    private fun restartSr() {
+        pendingSrStart = false
+        h.removeCallbacks(scoStartTimeout)
+        if (listening) {
+            try { sr?.cancel() } catch (e: Exception) {
+                android.util.Log.w("J.A.R.V.I.S.", "A korábbi hangfelismerés megszakítása sikertelen", e)
+            }
+        }
+        sr?.destroy()
+        sr = null
+        listening = false
+        initSr()
+        startSr()
+    }
+
     private fun beginSr() {
-        try { sr?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU") }) }
+        val recognizer = sr
+        if (recognizer == null) {
+            android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerő nem áll rendelkezésre")
+            return
+        }
+        try { recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU") }) }
         catch (e: Exception) { android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e) }
     }
-    private fun stopSr() { pendingSrStart = false; h.removeCallbacks(scoStartTimeout); listening = false; icon.alpha = 1f; updateHudAnimation(); try { sr?.stopListening() } catch (_: Exception) {} }
     private fun say(t: String) { h.post { tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "j") } }
     private fun app(pkg: String, n: String) { val i = packageManager.getLaunchIntentForPackage(pkg); if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); say("$n megnyitása.") } else say("$n nincs telepítve.") }
     private fun torch(on: Boolean) { try { val cm = getSystemService(CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], on); say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.") } catch (_: Exception) { say("Zseblámpa hiba.") } }
@@ -339,18 +440,27 @@ class FloatingAssistantService : Service() {
     override fun onDestroy() {
         pendingSrStart = false
         h.removeCallbacks(scoStartTimeout)
-        try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("J.A.R.V.I.S.", "SCO receiver was already unregistered", e) }
+        if (scoReceiverRegistered) {
+            try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("J.A.R.V.I.S.", "SCO receiver was already unregistered", e) }
+        }
         mediaSession?.run { isActive = false; release() }
         mediaSession = null
         if (Build.VERSION.SDK_INT >= 31) {
-            val previousDevice = originalCommunicationDevice
-            if (previousDevice == null) audioManager.clearCommunicationDevice() else audioManager.setCommunicationDevice(previousDevice)
+            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                val previousDevice = originalCommunicationDevice
+                if (previousDevice == null) audioManager.clearCommunicationDevice() else audioManager.setCommunicationDevice(previousDevice)
+            }
         }
         else { audioManager.isBluetoothScoOn = false; audioManager.stopBluetoothSco() }
         audioManager.mode = originalAudioMode
         audioManager.isSpeakerphoneOn = originalSpeakerphoneOn
-        icon.stopAnimation()
-        try { wm.removeView(root); wm.removeView(closeBtn) } catch (_: Exception) {}
+        if (::icon.isInitialized) icon.stopAnimation()
+        if (::wm.isInitialized) {
+            try {
+                if (::root.isInitialized) wm.removeView(root)
+                if (::closeBtn.isInitialized) wm.removeView(closeBtn)
+            } catch (_: Exception) {}
+        }
         sr?.destroy(); tts?.shutdown(); super.onDestroy()
     }
 }

@@ -25,11 +25,18 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val REQUEST_PERMISSION_SETUP = 1
+        private const val REQUEST_START_PERMISSIONS = 2
+        private const val REQUEST_OVERLAY_PERMISSION = 3
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val preferences = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
@@ -97,15 +104,11 @@ class MainActivity : AppCompatActivity() {
         })
 
         content.addView(button("1. MIKROFON + BLUETOOTH + ÉRTESÍTÉS") {
-            val permissions = mutableListOf(
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.MODIFY_AUDIO_SETTINGS,
-                Manifest.permission.POST_NOTIFICATIONS
+            ActivityCompat.requestPermissions(
+                this,
+                startupPermissions().toTypedArray(),
+                REQUEST_PERMISSION_SETUP
             )
-            if (Build.VERSION.SDK_INT >= 31) {
-                permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 1)
         })
         content.addView(button(
             "2. LEBEGŐ ABLAK ENGEDÉLY",
@@ -176,8 +179,7 @@ class MainActivity : AppCompatActivity() {
             fillColor = Color.parseColor("#00E676"),
             textColor = Color.parseColor("#04120C")
         ) {
-            val intent = Intent(this, FloatingAssistantService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            startAssistantWhenReady()
         })
         content.addView(button(
             "■ LEÁLLÍTÁS",
@@ -192,6 +194,72 @@ class MainActivity : AppCompatActivity() {
             addView(content)
         }, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+    }
+
+    private fun startupPermissions(): List<String> = buildList {
+        add(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
+    }
+
+    private fun startAssistantWhenReady() {
+        val missingPermissions = startupPermissions().filter {
+            ActivityCompat.checkSelfPermission(this, it) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (missingPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                missingPermissions.toTypedArray(),
+                REQUEST_START_PERMISSIONS
+            )
+            return
+        }
+
+        if (!Settings.canDrawOverlays(this)) {
+            startActivityForResult(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                ),
+                REQUEST_OVERLAY_PERMISSION
+            )
+            return
+        }
+
+        val intent = Intent(this, FloatingAssistantService::class.java)
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_START_PERMISSIONS) return
+
+        if (startupPermissions().all {
+                ActivityCompat.checkSelfPermission(this, it) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+        ) {
+            startAssistantWhenReady()
+        } else {
+            Toast.makeText(this, "Az asszisztens indításához szükséges engedélyek hiányoznak.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @Deprecated("Deprecated in Android, retained for overlay permission settings result")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_OVERLAY_PERMISSION) return
+
+        if (Settings.canDrawOverlays(this)) {
+            startAssistantWhenReady()
+        } else {
+            Toast.makeText(this, "A lebegő ablak engedélyezése szükséges.", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
