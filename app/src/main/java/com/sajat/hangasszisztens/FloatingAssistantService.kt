@@ -6,23 +6,53 @@ import android.media.AudioManager
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import androidx.core.content.ContextCompat
 class FloatingAssistantService : Service() {
     companion object {
         const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
     }
 
+    private enum class HudState { IDLE, LISTENING, THINKING, SPEAKING }
+
     private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ReactorHudView; private lateinit var closeBtn: TextView
+    private lateinit var bubble: TextView
     private lateinit var params: WindowManager.LayoutParams; private lateinit var closeParams: WindowManager.LayoutParams
+    private lateinit var bubbleParams: WindowManager.LayoutParams
     private var sr: SpeechRecognizer? = null; private var tts: TextToSpeech? = null; private val h = Handler(Looper.getMainLooper()); private val hist = ArrayDeque<String>()
+    private var historyUpdatedAt = 0L
     private lateinit var audioManager: AudioManager
     private var mediaSession: MediaSession? = null
     private var pendingSrStart = false
+    private var activeListening = false
+    private var thinking = false
+    private var recognizerSoundsMuted = false
+    private var restartAfterSpeech = false
     private var scoReceiverRegistered = false
     private var originalAudioMode = AudioManager.MODE_NORMAL
     private var originalSpeakerphoneOn = false
     private var originalCommunicationDevice: AudioDeviceInfo? = null
     private var docked = true; private var right = true; private var listening = false; private var speaking = false; private var sw = 1080; private var sh = 2400
+    private val wakeWordPattern = Regex("^(?:jarvis|dzsárvisz|dzsarvis|dzsárvis|javis)(?:\\b|(?=\\s|[,.:;!?-]|$))\\s*[,.:;!?-]*\\s*", RegexOption.IGNORE_CASE)
+    private val activeListeningTimeout = Runnable {
+        activeListening = false
+        updateHudAnimation()
+    }
+    private val hideBubble = Runnable {
+        if (::bubble.isInitialized) {
+            bubble.animate().alpha(0f).setDuration(500L).withEndAction {
+                bubble.visibility = View.GONE
+            }.start()
+        }
+    }
+    private val unmuteRecognizerSounds = Runnable {
+        if (recognizerSoundsMuted) {
+            listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
+                audioManager.adjustStreamVolume(it, AudioManager.ADJUST_UNMUTE, 0)
+            }
+            recognizerSoundsMuted = false
+        }
+    }
     private val scoStartTimeout = Runnable {
         if (pendingSrStart) {
             pendingSrStart = false
@@ -85,18 +115,26 @@ class FloatingAssistantService : Service() {
                 tts?.apply {
                     setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     language = Locale("hu", "HU")
+                    voices
+                        ?.filter {
+                            it.locale.language == "hu" &&
+                                (it.quality >= Voice.QUALITY_HIGH || it.isNetworkConnectionRequired)
+                        }
+                        ?.maxByOrNull { it.quality }
+                        ?.let { voice = it }
+                    setSpeechRate(1.05f)
                     setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             h.post { speaking = true; updateHudAnimation() }
                         }
                         override fun onDone(utteranceId: String?) {
-                            h.post { speaking = false; updateHudAnimation() }
+                            h.post { finishSpeech() }
                         }
                         override fun onError(utteranceId: String?) {
-                            h.post { speaking = false; updateHudAnimation() }
+                            h.post { finishSpeech() }
                         }
                         override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                            h.post { speaking = false; updateHudAnimation() }
+                            h.post { finishSpeech() }
                         }
                     })
                 }
@@ -108,15 +146,38 @@ class FloatingAssistantService : Service() {
         val t = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
         params = WindowManager.LayoutParams(dp(22f), dp(145f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = sw - dp(22f); y = sh / 3 }
         closeBtn = TextView(this).apply { text = "✕"; textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#E53935")) }; visibility = View.GONE }
+        bubble = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(dp(14f), dp(10f), dp(14f), dp(10f))
+            maxWidth = dp(280f)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14f).toFloat()
+                setColor(Color.parseColor("#EE06152F"))
+                setStroke(dp(1f), Color.parseColor("#7733B5E5"))
+            }
+            visibility = View.GONE
+            alpha = 0f
+        }
         closeParams = WindowManager.LayoutParams(dp(58f), dp(58f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(48f) }
-        wm.addView(closeBtn, closeParams); wm.addView(root, params); dock(); touch(); initSr(); initMediaSession()
+        bubbleParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            t,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        wm.addView(closeBtn, closeParams); wm.addView(root, params); wm.addView(bubble, bubbleParams)
+        dock(); touch(); initSr(); initMediaSession(); startSr()
     }
     private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#AA060B19")); setStroke(dp(1f), Color.parseColor("#7700E676")) }
-    private fun dock() { docked = true; root.background = null; icon.setHudState(true, listening || speaking || pendingSrStart); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
+    private fun dock() { docked = true; root.background = null; icon.setHudState(true, currentHudState()); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
     private fun undock() {
         docked = false
         root.background = hudBackground()
-        icon.setHudState(false, listening || speaking || pendingSrStart)
+        icon.setHudState(false, currentHudState())
         params.width = dp(76f)
         params.height = dp(76f)
         if (params.x > sw - dp(80f)) params.x = sw - dp(92f)
@@ -139,7 +200,7 @@ class FloatingAssistantService : Service() {
                     if (drag) {
                         if (e.rawY > sh - dp(125f) && abs(e.rawX - sw / 2f) < dp(75f)) stopSelf()
                         else if (e.rawX < 65 || e.rawX > sw - 65) { right = e.rawX >= sw / 2f; dock() }
-                    } else { tts?.stop(); if (docked) undock(); restartSr() }
+                    } else { tts?.stop(); if (docked) undock(); activateListening() }
                     true
                 }
                 else -> false
@@ -175,15 +236,15 @@ class FloatingAssistantService : Service() {
                 icon.alpha = 1f
                 updateHudAnimation()
                 android.util.Log.w("J.A.R.V.I.S.", "A hangfelismerés leállt hibával: $p0")
+                scheduleWakeListening()
             }
             override fun onResults(b: Bundle?) {
                 if (sr !== recognizer) return
                 listening = false
                 icon.alpha = 1f
                 updateHudAnimation()
-                b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    ?.let { runCmd(it) }
+                val result = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (result != null) handleRecognition(result) else scheduleWakeListening()
             }
             override fun onPartialResults(p0: Bundle?) {}
             override fun onEvent(p0: Int, p1: Bundle?) {}
@@ -254,7 +315,6 @@ class FloatingAssistantService : Service() {
         }
         if (sr == null) initSr()
         if (sr == null) return
-        tts?.stop()
         try {
             if (routeAudioToBluetooth()) {
                 pendingSrStart = true
@@ -287,22 +347,145 @@ class FloatingAssistantService : Service() {
         startSr()
     }
 
+    private fun handleRecognition(raw: String) {
+        val trimmed = raw.trim()
+        val wakeMatch = wakeWordPattern.find(trimmed)
+        if (wakeMatch != null) {
+            val command = trimmed.substring(wakeMatch.range.last + 1).trim()
+            if (command.isEmpty()) {
+                activateListening()
+                return
+            }
+            runCmd(command)
+            scheduleWakeListening(recreateRecognizer = true)
+            return
+        }
+        runCmd(raw)
+        scheduleWakeListening()
+    }
+
+    private fun activateListening() {
+        val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
+        if (vibrator.hasVibrator()) {
+            if (Build.VERSION.SDK_INT >= 26) {
+                vibrator.vibrate(VibrationEffect.createOneShot(40L, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(40L)
+            }
+        }
+        activeListening = true
+        h.removeCallbacks(activeListeningTimeout)
+        h.postDelayed(activeListeningTimeout, 8_000L)
+        updateHudAnimation()
+        startSr()
+    }
+
+    private fun scheduleWakeListening(recreateRecognizer: Boolean = false) {
+        h.postDelayed({
+            if (tts?.isSpeaking == true) {
+                restartAfterSpeech = true
+            } else {
+                if (recreateRecognizer) restartSr() else startSr()
+            }
+        }, 700L)
+    }
+
+    private fun finishSpeech() {
+        speaking = tts?.isSpeaking == true
+        updateHudAnimation()
+        if (!speaking && restartAfterSpeech) {
+            restartAfterSpeech = false
+            startSr()
+        }
+    }
+
     private fun beginSr() {
         val recognizer = sr
         if (recognizer == null) {
             android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerő nem áll rendelkezésre")
             return
         }
-        try { recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU") }) }
+        try {
+            recognizerSoundsMuted = true
+            h.removeCallbacks(unmuteRecognizerSounds)
+            h.postDelayed(unmuteRecognizerSounds, 300L)
+            listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
+                audioManager.adjustStreamVolume(it, AudioManager.ADJUST_MUTE, 0)
+            }
+            recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU")
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            })
+        }
         catch (e: Exception) { android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e) }
     }
-    private fun say(t: String) { h.post { tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "j") } }
+    private fun say(t: String) {
+        h.post {
+            showBubble(t)
+            val speech = t.trim().takeIf { it.isNotEmpty() } ?: return@post
+            val sentences = Regex("[^.!?]+[.!?]+|[^.!?]+$")
+                .findAll(speech)
+                .map { it.value.trim() }
+                .filter { it.isNotEmpty() }
+                .toList()
+            sentences.forEachIndexed { index, sentence ->
+                val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                tts?.speak(sentence, queueMode, null, "jarvis-${System.nanoTime()}")
+            }
+        }
+    }
+
+    private fun showBubble(text: String) {
+        if (!::bubble.isInitialized) return
+        h.removeCallbacks(hideBubble)
+        bubble.text = text
+        val maxBubbleWidth = dp(280f)
+        bubbleParams.x = if (right) {
+            (params.x - maxBubbleWidth - dp(8f)).coerceAtLeast(dp(8f))
+        } else {
+            (params.x + params.width + dp(8f)).coerceAtMost(sw - maxBubbleWidth)
+        }
+        bubbleParams.y = (params.y - dp(62f)).coerceAtLeast(dp(24f))
+        bubble.visibility = View.VISIBLE
+        bubble.alpha = 0f
+        try {
+            wm.updateViewLayout(bubble, bubbleParams)
+            bubble.animate().alpha(1f).setDuration(180L).start()
+            h.postDelayed(hideBubble, 4_500L)
+        } catch (e: WindowManager.BadTokenException) {
+            android.util.Log.w("J.A.R.V.I.S.", "A HUD szövegbuborék nem jeleníthető meg", e)
+        }
+    }
     private fun app(pkg: String, n: String) { val i = packageManager.getLaunchIntentForPackage(pkg); if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); say("$n megnyitása.") } else say("$n nincs telepítve.") }
     private fun torch(on: Boolean) { try { val cm = getSystemService(CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], on); say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.") } catch (_: Exception) { say("Zseblámpa hiba.") } }
     private fun runCmd(raw: String) {
         val c = raw.lowercase(Locale("hu", "HU"))
         when {
-            "idő" in c || "hány óra" in c -> say("Pontos idő: " + SimpleDateFormat("HH:mm", Locale("hu", "HU")).format(Date()))
+            "idő" in c || "hány óra" in c || "mennyi az idő" in c -> say("Pontos idő: " + SimpleDateFormat("HH:mm", Locale("hu", "HU")).format(Date()))
+            "akkumulátor" in c || "töltöttség" in c -> {
+                val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+                if (level >= 0 && scale > 0) {
+                    say("Az akkumulátor töltöttsége ${level * 100 / scale} százalék.")
+                } else {
+                    say("Az akkumulátor töltöttsége most nem olvasható.")
+                }
+            }
+            c.startsWith("makró ") || c == "makró" -> {
+                val command = raw.trim().substringAfter(' ', "").trim()
+                if (command.isEmpty()) {
+                    say("Mondd el, melyik makrót futtassam.")
+                } else {
+                    sendBroadcast(
+                        Intent("com.sajat.hangasszisztens.MACRO_COMMAND")
+                            .putExtra("command", command)
+                    )
+                    say("Makró indítása: $command")
+                }
+            }
             "dátum" in c || "milyen nap" in c -> say("Ma " + SimpleDateFormat("yyyy. MMMM d., EEEE", Locale("hu", "HU")).format(Date()) + " van.")
             "zseblámpa" in c -> torch("ki" !in c && "le" !in c)
             "youtube" in c -> app("com.google.android.youtube", "YouTube")
@@ -311,7 +494,28 @@ class FloatingAssistantService : Service() {
             "térkép" in c || "maps" in c -> app("com.google.android.apps.maps", "Térkép")
             "naptár" in c && "emlékeztess" !in c -> app("com.google.android.calendar", "Naptár")
             "beállítások" in c -> { startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); say("Beállítások.") }
-            "navigálj" in c || "útvonal" in c -> { val d = raw.replace(Regex("(?i)(navigálj|útvonal|ide|oda|:)"), "").trim(); try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + Uri.encode(d))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); say("Navigáció: $d") } catch (_: Exception) { say("Nincs navigáció.") } }
+            c.startsWith("navigáció") || c.startsWith("navigálj") || c.startsWith("útvonal") -> {
+                val destination = raw.replace(
+                    Regex("(?i)^\\s*(navigáció|navigálj(?:\\s+ide)?|útvonal)\\s*"),
+                    ""
+                ).trim()
+                if (destination.isEmpty()) {
+                    say("Hová navigáljak?")
+                } else {
+                    try {
+                        startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("google.navigation:q=" + Uri.encode(destination))
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        say("Navigáció: $destination")
+                    } catch (e: Exception) {
+                        android.util.Log.w("J.A.R.V.I.S.", "Navigáció nem indítható", e)
+                        say("Nincs elérhető navigációs alkalmazás.")
+                    }
+                }
+            }
             "tárcsáz" in c || "hívd" in c -> { startActivity(Intent(Intent.ACTION_DIAL).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); say("Tárcsázó.") }
             "időzítő" in c -> { val m = Regex("\\d+").find(c)?.value?.toIntOrNull() ?: 5; try { startActivity(Intent(AlarmClock.ACTION_SET_TIMER).apply { putExtra(AlarmClock.EXTRA_LENGTH, m * 60); putExtra(AlarmClock.EXTRA_SKIP_UI, true); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); say("$m perces időzítő.") } catch (_: Exception) {} }
             "ébresztő" in c || "ébressz" in c -> { val n = Regex("\\d+").findAll(c).map { it.value.toInt() }.toList(); try { startActivity(Intent(AlarmClock.ACTION_SET_ALARM).apply { putExtra(AlarmClock.EXTRA_HOUR, n.getOrNull(0) ?: 7); putExtra(AlarmClock.EXTRA_MINUTES, n.getOrNull(1) ?: 0); putExtra(AlarmClock.EXTRA_SKIP_UI, true); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); say("Ébresztő beállítva.") } catch (_: Exception) {} }
@@ -323,26 +527,59 @@ class FloatingAssistantService : Service() {
     private fun askAi(q: String) {
         val k = getSharedPreferences("jarvis_prefs", MODE_PRIVATE).getString("gemini_key", "") ?: ""
         if (k.isEmpty()) { say("Ezt hallottam: $q. Add meg az API-kulcsot a vezérlőpulton."); return }
+        thinking = true
+        updateHudAnimation()
         say("Pillanat...")
         thread {
             try {
-                if (hist.size >= 6) hist.removeFirst(); hist.addLast("F: $q")
-                val prompt = "Te J.A.R.V.I.S. magyar hangasszisztens vagy. Válaszolj 2 rövid, tömör mondatban, formázás nélkül.\n" + hist.joinToString("\n")
+                val prompt = synchronized(hist) {
+                    val now = System.currentTimeMillis()
+                    if (now - historyUpdatedAt > 10 * 60 * 1000L) hist.clear()
+                    while (hist.size >= 12) {
+                        hist.removeFirst()
+                        if (hist.isNotEmpty()) hist.removeFirst()
+                    }
+                    hist.addLast("Felhasználó: $q")
+                    historyUpdatedAt = now
+                    "Te J.A.R.V.I.S. magyar hangasszisztens vagy. Válaszolj 2 rövid, tömör mondatban, formázás nélkül.\n" +
+                        hist.joinToString("\n")
+                }
                 val ans = GeminiApi.generateContent(k, prompt).replace("*", "").trim()
-                if (hist.size >= 6) hist.removeFirst(); hist.addLast("A: $ans"); say(ans)
+                synchronized(hist) {
+                    while (hist.size >= 12) {
+                        hist.removeFirst()
+                        if (hist.isNotEmpty()) hist.removeFirst()
+                    }
+                    hist.addLast("J.A.R.V.I.S.: $ans")
+                    historyUpdatedAt = System.currentTimeMillis()
+                }
+                h.post { thinking = false; updateHudAnimation() }
+                say(ans)
             } catch (e: Exception) {
                 android.util.Log.e("J.A.R.V.I.S.", "Gemini kérés sikertelen az összes modellen", e)
-                h.post { Toast.makeText(this, e.message ?: "Gemini kérés sikertelen.", Toast.LENGTH_LONG).show() }
+                h.post {
+                    thinking = false
+                    updateHudAnimation()
+                    Toast.makeText(this, e.message ?: "Gemini kérés sikertelen.", Toast.LENGTH_LONG).show()
+                }
                 say("Gemini hiba, ellenőrizd a netet vagy a kulcsot.")
             }
         }
     }
+    private fun currentHudState(): HudState = when {
+        speaking -> HudState.SPEAKING
+        thinking -> HudState.THINKING
+        activeListening -> HudState.LISTENING
+        else -> HudState.IDLE
+    }
+
     private fun updateHudAnimation() {
-        if (::icon.isInitialized) icon.setHudState(docked, listening || speaking || pendingSrStart)
+        if (::icon.isInitialized) icon.setHudState(docked, currentHudState())
     }
     private inner class ReactorHudView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var isDocked = true
+        private var hudState = HudState.IDLE
         private var pulse = 0.5f
         private val pulseAnimator = ValueAnimator.ofFloat(0.35f, 1f).apply {
             repeatCount = ValueAnimator.INFINITE
@@ -360,9 +597,15 @@ class FloatingAssistantService : Service() {
             setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }
 
-        fun setHudState(docked: Boolean, active: Boolean) {
+        fun setHudState(docked: Boolean, state: HudState) {
             isDocked = docked
-            pulseAnimator.duration = if (active) 620L else 1_700L
+            hudState = state
+            pulseAnimator.duration = when (state) {
+                HudState.IDLE -> 1_700L
+                HudState.LISTENING -> 620L
+                HudState.THINKING -> 1_050L
+                HudState.SPEAKING -> 850L
+            }
             invalidate()
         }
 
@@ -370,30 +613,36 @@ class FloatingAssistantService : Service() {
             super.onDraw(canvas)
             val cx = width / 2f
             val cy = height / 2f
+            val accent = when (hudState) {
+                HudState.IDLE -> Color.rgb(90, 220, 232)
+                HudState.LISTENING -> Color.rgb(0, 230, 118)
+                HudState.THINKING -> Color.rgb(0, 229, 255)
+                HudState.SPEAKING -> Color.rgb(255, 179, 0)
+            }
             val cyan = Color.rgb(0, 229, 255)
-            val green = Color.rgb(0, 230, 118)
+            val green = accent
             val alpha = (70 + 75 * pulse).toInt().coerceIn(0, 255)
 
             paint.style = Paint.Style.FILL
             paint.shader = RadialGradient(
                 cx, cy, dp(if (isDocked) 24f else 42f) * (0.72f + pulse * 0.45f),
-                intArrayOf(Color.argb(alpha, 0, 230, 118), Color.argb(0, 0, 229, 255)),
+                intArrayOf(Color.argb(alpha, Color.red(accent), Color.green(accent), Color.blue(accent)), Color.argb(0, 0, 229, 255)),
                 null,
                 Shader.TileMode.CLAMP
             )
             if (isDocked) {
                 val track = RectF(cx - dp(4f), dp(8f).toFloat(), cx + dp(4f), height - dp(8f).toFloat())
                 paint.shader = null
-                paint.color = Color.argb(50, 0, 230, 118)
+                paint.color = Color.argb(50, Color.red(accent), Color.green(accent), Color.blue(accent))
                 canvas.drawRoundRect(track, dp(5f).toFloat(), dp(5f).toFloat(), paint)
                 paint.shader = RadialGradient(
                     cx, cy, dp(24f) * (0.72f + pulse * 0.45f),
-                    intArrayOf(Color.argb(alpha, 0, 230, 118), Color.argb(0, 0, 229, 255)),
+                    intArrayOf(Color.argb(alpha, Color.red(accent), Color.green(accent), Color.blue(accent)), Color.argb(0, 0, 229, 255)),
                     null, Shader.TileMode.CLAMP
                 )
                 canvas.drawCircle(cx, cy, dp(24f) * (0.72f + pulse * 0.45f), paint)
                 paint.shader = null
-                paint.color = Color.argb(alpha, 0, 230, 118)
+                paint.color = Color.argb(alpha, Color.red(accent), Color.green(accent), Color.blue(accent))
                 canvas.drawRoundRect(
                     RectF(cx - dp(2f), cy - dp(13f) * (0.75f + pulse * 0.35f), cx + dp(2f), cy + dp(13f) * (0.75f + pulse * 0.35f)),
                     dp(3f).toFloat(), dp(3f).toFloat(), paint
@@ -413,7 +662,7 @@ class FloatingAssistantService : Service() {
                 }
                 val bounds = RectF(cx - radius * 0.82f, cy - radius * 0.82f, cx + radius * 0.82f, cy + radius * 0.82f)
                 paint.strokeWidth = dp(2f).toFloat()
-                paint.color = Color.argb(alpha, 0, 229, 255)
+                paint.color = Color.argb(alpha, Color.red(accent), Color.green(accent), Color.blue(accent))
                 canvas.drawArc(bounds, -65f, 105f, false, paint)
                 canvas.drawArc(bounds, 112f, 112f, false, paint)
                 canvas.drawArc(bounds, 245f, 55f, false, paint)
@@ -421,13 +670,13 @@ class FloatingAssistantService : Service() {
                 val coreRadius = radius * (0.17f + pulse * 0.035f)
                 paint.shader = RadialGradient(
                     cx, cy, coreRadius * 1.8f,
-                    intArrayOf(Color.WHITE, green, cyan, Color.argb(0, 0, 229, 255)),
+                    intArrayOf(Color.WHITE, accent, cyan, Color.argb(0, 0, 229, 255)),
                     floatArrayOf(0f, 0.35f, 0.62f, 1f),
                     Shader.TileMode.CLAMP
                 )
                 canvas.drawCircle(cx, cy, coreRadius * 1.8f, paint)
                 paint.shader = null
-                paint.color = Color.argb(alpha, 0, 230, 118)
+                paint.color = Color.argb(alpha, Color.red(accent), Color.green(accent), Color.blue(accent))
                 canvas.drawCircle(cx, cy, coreRadius, paint)
             }
             paint.shader = null
@@ -439,7 +688,16 @@ class FloatingAssistantService : Service() {
     }
     override fun onDestroy() {
         pendingSrStart = false
+        h.removeCallbacks(activeListeningTimeout)
+        h.removeCallbacks(hideBubble)
         h.removeCallbacks(scoStartTimeout)
+        h.removeCallbacks(unmuteRecognizerSounds)
+        if (recognizerSoundsMuted) {
+            listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
+                audioManager.adjustStreamVolume(it, AudioManager.ADJUST_UNMUTE, 0)
+            }
+            recognizerSoundsMuted = false
+        }
         if (scoReceiverRegistered) {
             try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("J.A.R.V.I.S.", "SCO receiver was already unregistered", e) }
         }
@@ -459,6 +717,7 @@ class FloatingAssistantService : Service() {
             try {
                 if (::root.isInitialized) wm.removeView(root)
                 if (::closeBtn.isInitialized) wm.removeView(closeBtn)
+                if (::bubble.isInitialized) wm.removeView(bubble)
             } catch (_: Exception) {}
         }
         sr?.destroy(); tts?.shutdown(); super.onDestroy()

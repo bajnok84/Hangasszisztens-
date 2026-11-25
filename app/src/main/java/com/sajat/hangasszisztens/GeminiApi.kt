@@ -8,8 +8,8 @@ import java.net.URL
 
 internal object GeminiApi {
     private val openRouterModels = listOf(
-        "openrouter/free",
-        "google/gemma-4-31b-it:free"
+        "openrouter/free:online",
+        "openrouter/free"
     )
 
     private val models = listOf(
