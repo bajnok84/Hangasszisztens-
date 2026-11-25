@@ -8,31 +8,44 @@ import java.net.URL
 
 internal object GeminiApi {
     private val models = listOf(
-        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
         "gemini-3.8-flash-lite",
-        "gemini-2.5-flash-lite"
+        "gemini-3.8-flash"
     )
 
     fun generateContent(apiKey: String, prompt: String): String {
         var lastFailure: Exception? = null
+        var throttled = false
 
-        models.forEachIndexed { index, model ->
-            try {
-                return request(apiKey, model, prompt)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw e
-            } catch (e: Exception) {
-                lastFailure = e
-                if (index < models.lastIndex) {
-                    try {
-                        Thread.sleep(400)
-                    } catch (interrupted: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        throw interrupted
+        for (round in 0..1) {
+            models.forEachIndexed { index, model ->
+                try {
+                    return request(apiKey, model, prompt)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw e
+                } catch (e: Exception) {
+                    lastFailure = e
+                    val rateLimited = e is GeminiHttpException &&
+                        (e.statusCode == 429 || e.statusCode == 503)
+                    throttled = throttled || rateLimited
+
+                    val hasNextModel = index < models.lastIndex
+                    val hasAnotherRound = round == 0 && throttled
+                    if (hasNextModel || hasAnotherRound) {
+                        try {
+                            Thread.sleep(if (rateLimited) 1_200 else 400)
+                        } catch (interrupted: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            throw interrupted
+                        }
                     }
                 }
             }
+
+            if (round == 0 && !throttled) break
         }
 
         throw IOException(
@@ -73,11 +86,11 @@ internal object GeminiApi {
                 connection.inputStream
             } else {
                 connection.errorStream
-                    ?: throw IOException("Gemini HTTP $responseCode")
+                    ?: throw GeminiHttpException(responseCode, "")
             }
             val responseBody = responseStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             if (responseCode !in 200..299) {
-                throw IOException("Gemini HTTP $responseCode: $responseBody")
+                throw GeminiHttpException(responseCode, responseBody)
             }
 
             return JSONObject(responseBody)
@@ -94,4 +107,9 @@ internal object GeminiApi {
             connection.disconnect()
         }
     }
+
+    private class GeminiHttpException(
+        val statusCode: Int,
+        responseBody: String
+    ) : IOException("Gemini HTTP $statusCode: $responseBody")
 }
