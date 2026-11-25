@@ -1,2 +1,2 @@
-# Hangasszisztens-
-hang 
+# AI_Asszisztens-
+Mindenes...
