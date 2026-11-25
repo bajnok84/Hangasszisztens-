@@ -7,6 +7,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 internal object GeminiApi {
+    private val openRouterModels = listOf(
+        "openrouter/free",
+        "google/gemma-4-31b-it:free"
+    )
+
     private val models = listOf(
         "gemini-3.5-flash-lite",
         "gemini-3.5-flash",
@@ -16,6 +21,53 @@ internal object GeminiApi {
     )
 
     fun generateContent(apiKey: String, prompt: String): String {
+        return when {
+            apiKey.startsWith("sk-or-") -> generateOpenRouterContent(apiKey, prompt)
+            apiKey.startsWith("sk-") -> chatCompletion(
+                "https://api.openai.com/v1/chat/completions",
+                apiKey,
+                "gpt-4o-mini",
+                prompt,
+                "OpenAI"
+            )
+            apiKey.startsWith("gsk_") -> chatCompletion(
+                "https://api.groq.com/openai/v1/chat/completions",
+                apiKey,
+                "llama-3.3-70b-versatile",
+                prompt,
+                "Groq"
+            )
+            apiKey.startsWith("AIza") || apiKey.startsWith("AQ.") ->
+                generateGeminiContent(apiKey, prompt)
+            else -> throw IOException("Unsupported API key format")
+        }
+    }
+
+    private fun generateOpenRouterContent(apiKey: String, prompt: String): String {
+        var lastFailure: Exception? = null
+        openRouterModels.forEach { model ->
+            try {
+                return chatCompletion(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    apiKey,
+                    model,
+                    prompt,
+                    "OpenRouter"
+                )
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw e
+            } catch (e: Exception) {
+                lastFailure = e
+            }
+        }
+        throw IOException(
+            "All OpenRouter models failed: ${lastFailure?.message ?: "unknown error"}",
+            lastFailure
+        )
+    }
+
+    private fun generateGeminiContent(apiKey: String, prompt: String): String {
         var lastFailure: Exception? = null
         var throttled = false
 
@@ -52,6 +104,62 @@ internal object GeminiApi {
             "All Gemini models failed: ${lastFailure?.message ?: "unknown error"}",
             lastFailure
         )
+    }
+
+    private fun chatCompletion(
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        prompt: String,
+        provider: String
+    ): String {
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            requestMethod = "POST"
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("Content-Type", "application/json")
+            doOutput = true
+        }
+
+        try {
+            val body = JSONObject()
+                .put("model", model)
+                .put(
+                    "messages",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", prompt)
+                    )
+                )
+            connection.outputStream.use {
+                it.write(body.toString().toByteArray(Charsets.UTF_8))
+            }
+
+            val responseCode = connection.responseCode
+            val responseStream = if (responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream
+                    ?: throw ChatCompletionHttpException(provider, responseCode, "")
+            }
+            val responseBody = responseStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            if (responseCode !in 200..299) {
+                throw ChatCompletionHttpException(provider, responseCode, responseBody)
+            }
+
+            return JSONObject(responseBody)
+                .getJSONArray("choices")
+                .getJSONObject(0)
+                .getJSONObject("message")
+                .getString("content")
+                .trim()
+                .takeIf { it.isNotEmpty() }
+                ?: throw IOException("$provider returned an empty response")
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun request(apiKey: String, model: String, prompt: String): String {
@@ -112,4 +220,10 @@ internal object GeminiApi {
         val statusCode: Int,
         responseBody: String
     ) : IOException("Gemini HTTP $statusCode: $responseBody")
+
+    private class ChatCompletionHttpException(
+        provider: String,
+        statusCode: Int,
+        responseBody: String
+    ) : IOException("$provider HTTP $statusCode: $responseBody")
 }

@@ -122,7 +122,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         val input = EditText(this).apply {
-            hint = "Gemini API-kulcs"
+            hint = "API-kulcs (OpenRouter sk-or-... / Gemini / OpenAI)"
             setHintTextColor(Color.parseColor("#91A7B8"))
             setTextColor(Color.WHITE)
             setShadowLayer(dp(1).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
