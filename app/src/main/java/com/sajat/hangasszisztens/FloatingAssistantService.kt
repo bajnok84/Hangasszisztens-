@@ -1,6 +1,11 @@
 package com.sajat.hangasszisztens
 import android.animation.ValueAnimator; import android.app.*; import android.content.*; import android.graphics.*; import android.graphics.drawable.GradientDrawable; import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraManager; import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.view.*; import android.view.animation.AccelerateDecelerateInterpolator; import android.widget.*; import androidx.core.app.NotificationCompat; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs; import kotlin.math.min
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CaptureRequest
+import android.media.ImageReader
+import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.util.Base64; import android.view.*; import android.view.animation.AccelerateDecelerateInterpolator; import android.widget.*; import androidx.core.app.NotificationCompat; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs; import kotlin.math.min
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
@@ -15,17 +20,47 @@ class FloatingAssistantService : Service() {
     companion object {
         const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
         const val ACTION_MACRO_COMMAND = "com.sajat.hangasszisztens.MACRO_COMMAND"
+        const val ACTION_HUD_UPDATE = "com.sajat.hangasszisztens.HUD_UPDATE"
+        const val EXTRA_HUD_STATE = "hud_state"
+        const val EXTRA_HUD_RMS = "hud_rms"
+        const val EXTRA_AUTO_GREETING = "auto_greeting"
         private const val NOTIFICATION_ID = 1
-        private const val NOTIFICATION_CHANNEL_ID = "jarvis_ch"
+        private const val NOTIFICATION_CHANNEL_ID = "neo_ch"
+        private val crashHandlerInstalled = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        internal fun installCrashHandler(context: Context) {
+            if (!crashHandlerInstalled.compareAndSet(false, true)) return
+            val appContext = context.applicationContext
+            val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                val log = android.util.Log.getStackTraceString(error)
+                val saved = appContext.getSharedPreferences("neo_prefs", Context.MODE_PRIVATE)
+                    .edit().putString("last_crash_log", log).commit()
+                if (!saved) android.util.Log.e("NEO", "Az összeomlási napló mentése sikertelen")
+                val restart = PendingIntent.getForegroundService(
+                    appContext,
+                    901,
+                    Intent(appContext, FloatingAssistantService::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                (appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager)
+                    .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1_000L, restart)
+                if (previousHandler != null) previousHandler.uncaughtException(thread, error)
+                else error.printStackTrace()
+            }
+        }
     }
 
-    private enum class HudState { IDLE, LISTENING, THINKING, SPEAKING }
+    private enum class AssistantState { IDLE, WAKE_WORD_LISTENING, ACTIVE_LISTENING, PROCESSING, SPEAKING }
 
     private lateinit var wm: WindowManager; private lateinit var root: FrameLayout; private lateinit var icon: ReactorHudView; private lateinit var closeBtn: TextView
+    private lateinit var cameraBtn: TextView
     private lateinit var bubble: TextView
     private lateinit var params: WindowManager.LayoutParams; private lateinit var closeParams: WindowManager.LayoutParams
     private lateinit var bubbleParams: WindowManager.LayoutParams
     private var sr: SpeechRecognizer? = null; private var tts: TextToSpeech? = null; private val h = Handler(Looper.getMainLooper()); private val hist = ArrayDeque<String>()
+    private val pendingSpeech = ArrayDeque<String>()
+    private var ttsReady = false
     private var historyUpdatedAt = 0L
     private lateinit var audioManager: AudioManager
     private var mediaSession: MediaSession? = null
@@ -34,14 +69,26 @@ class FloatingAssistantService : Service() {
     private var consecutiveRecognitionErrors = 0
     private var activeListening = false
     private var thinking = false
-    private var recognizerSoundsMuted = false
     private var restartAfterSpeech = false
     private var scoReceiverRegistered = false
     private var originalAudioMode = AudioManager.MODE_NORMAL
     private var originalSpeakerphoneOn = false
     private var originalCommunicationDevice: AudioDeviceInfo? = null
     private var docked = true; private var right = true; private var listening = false; private var speaking = false; private var sw = 1080; private var sh = 2400
-    private val wakeWordPattern = Regex("^(?:jarvis|dzsárvisz|dzsarvis|dzsárvis|javis)(?:\\b|(?=\\s|[,.:;!?-]|$))\\s*[,.:;!?-]*\\s*", RegexOption.IGNORE_CASE)
+    @Volatile private var assistantState = AssistantState.IDLE
+    @Volatile private var lastSpeechEventAt = SystemClock.elapsedRealtime()
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (assistantState != AssistantState.SPEAKING &&
+                assistantState != AssistantState.PROCESSING &&
+                SystemClock.elapsedRealtime() - lastSpeechEventAt >= 12_000L
+            ) {
+                android.util.Log.w("NEO", "A hangfelismerő watchdog újraépíti a felismerőt")
+                restartSr()
+            }
+            h.postDelayed(this, 12_000L)
+        }
+    }
     private val activeListeningTimeout = Runnable {
         activeListening = false
         updateHudAnimation()
@@ -61,14 +108,6 @@ class FloatingAssistantService : Service() {
             bubble.animate().alpha(0f).setDuration(500L).withEndAction {
                 bubble.visibility = View.GONE
             }.start()
-        }
-    }
-    private val unmuteRecognizerSounds = Runnable {
-        if (recognizerSoundsMuted) {
-            listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
-                audioManager.adjustStreamVolume(it, AudioManager.ADJUST_UNMUTE, 0)
-            }
-            recognizerSoundsMuted = false
         }
     }
     private val scoStartTimeout = Runnable {
@@ -96,13 +135,13 @@ class FloatingAssistantService : Service() {
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-            android.util.Log.e("J.A.R.V.I.S.", "A lebegő ablak vagy a mikrofon engedélye hiányzik")
+            android.util.Log.e("NEO", "A lebegő ablak vagy a mikrofon engedélye hiányzik")
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
 
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("J.A.R.V.I.S. aktív")
+            .setContentTitle("NEO aktív")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .build()
         ServiceCompat.startForeground(
@@ -112,13 +151,21 @@ class FloatingAssistantService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         )
 
-        if (intent?.action == ACTION_START_LISTENING) restartSr()
-        else startSr()
+        if (intent?.action == ACTION_START_LISTENING) {
+            tts?.stop()
+            speaking = false
+            restartAfterSpeech = false
+            activateListeningNow()
+        } else startSr()
+        if (intent?.getBooleanExtra(EXTRA_AUTO_GREETING, false) == true) {
+            say("NEO csatlakozott. Miben segíthetek?")
+        }
         return START_STICKY
     }
 
     override fun onCreate() {
         super.onCreate()
+        installCrashHandler(this)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         originalAudioMode = audioManager.mode
         originalSpeakerphoneOn = audioManager.isSpeakerphoneOn
@@ -131,7 +178,7 @@ class FloatingAssistantService : Service() {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(
                     NOTIFICATION_CHANNEL_ID,
-                    "J.A.R.V.I.S.",
+                    "NEO",
                     NotificationManager.IMPORTANCE_LOW
                 )
             )
@@ -140,7 +187,7 @@ class FloatingAssistantService : Service() {
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-            android.util.Log.e("J.A.R.V.I.S.", "Indítás megszakítva: hiányzó lebegő ablak- vagy mikrofonengedély")
+            android.util.Log.e("NEO", "Indítás megszakítva: hiányzó lebegő ablak- vagy mikrofonengedély")
             stopSelf()
             return
         }
@@ -174,12 +221,32 @@ class FloatingAssistantService : Service() {
                             h.post { finishSpeech() }
                         }
                     })
+                    ttsReady = true
+                    while (pendingSpeech.isNotEmpty()) enqueueSpeech(pendingSpeech.removeFirst())
                 }
             }
         }
         root = FrameLayout(this)
         icon = ReactorHudView(this)
         root.addView(icon, FrameLayout.LayoutParams(-1, -1))
+        cameraBtn = TextView(this).apply {
+            text = "📷"
+            textSize = 17f
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#EE06152F"))
+                setStroke(dp(1f), Color.parseColor("#FF00E5FF"))
+            }
+            setOnClickListener {
+                tts?.stop()
+                speaking = false
+                restartAfterSpeech = false
+                captureImageAndAsk()
+            }
+        }
+        root.addView(cameraBtn, FrameLayout.LayoutParams(dp(34f), dp(34f), Gravity.BOTTOM or Gravity.END))
         val t = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
         params = WindowManager.LayoutParams(dp(22f), dp(145f), t, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = sw - dp(22f); y = sh / 3 }
         closeBtn = TextView(this).apply { text = "✕"; textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#E53935")) }; visibility = View.GONE }
@@ -208,15 +275,17 @@ class FloatingAssistantService : Service() {
         ).apply { gravity = Gravity.TOP or Gravity.START }
         wm.addView(closeBtn, closeParams); wm.addView(root, params); wm.addView(bubble, bubbleParams)
         dock(); touch(); initSr(); initMediaSession()
+        h.postDelayed(watchdog, 12_000L)
     }
     private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#AA060B19")); setStroke(dp(1f), Color.parseColor("#7700E676")) }
-    private fun dock() { docked = true; root.background = null; icon.setHudState(true, currentHudState()); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
+    private fun dock() { docked = true; cameraBtn.visibility = View.GONE; root.background = null; icon.setHudState(true, currentHudState()); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
     private fun undock() {
         docked = false
         root.background = hudBackground()
         icon.setHudState(false, currentHudState())
         params.width = dp(76f)
         params.height = dp(76f)
+        cameraBtn.visibility = View.VISIBLE
         if (params.x > sw - dp(80f)) params.x = sw - dp(92f)
         if (params.x < dp(10f)) params.x = dp(16f)
         try { wm.updateViewLayout(root, params) } catch (_: Exception) {}
@@ -252,7 +321,7 @@ class FloatingAssistantService : Service() {
     }
     private fun initSr() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            android.util.Log.e("J.A.R.V.I.S.", "A készüléken nem érhető el hangfelismerő")
+            android.util.Log.e("NEO", "A készüléken nem érhető el hangfelismerő")
             showBubble("Nincs elérhető hangfelismerő.")
             return
         }
@@ -261,17 +330,25 @@ class FloatingAssistantService : Service() {
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(p0: Bundle?) {
                 if (sr !== recognizer) return
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
                 h.removeCallbacks(recognitionStartTimeout)
                 listening = true
                 icon.alpha = 0.7f
                 updateHudAnimation()
                 showBubble("Hallgatlak...")
             }
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(p0: Float) {}
+            override fun onBeginningOfSpeech() {
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
+            }
+            override fun onRmsChanged(p0: Float) {
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
+                icon.setRms(p0)
+                sendHudUpdate(rms = p0)
+            }
             override fun onBufferReceived(p0: ByteArray?) {}
             override fun onEndOfSpeech() {
                 if (sr !== recognizer) return
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
                 listening = false
                 icon.alpha = 1f
                 updateHudAnimation()
@@ -279,13 +356,14 @@ class FloatingAssistantService : Service() {
             override fun onError(p0: Int) {
                 if (sr !== recognizer) return
                 h.removeCallbacks(recognitionStartTimeout)
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
                 listening = false
                 recognitionActive = false
                 icon.alpha = 1f
                 updateHudAnimation()
-                android.util.Log.w("J.A.R.V.I.S.", "A hangfelismerés leállt hibával: $p0")
+                android.util.Log.w("NEO", "A hangfelismerés leállt hibával: $p0")
                 showBubble("Mikrofon hiba: $p0")
-                scheduleWakeListening(delayMillis = 500L)
+                scheduleRecognitionRetry()
             }
             override fun onResults(b: Bundle?) {
                 if (sr !== recognizer) return
@@ -298,12 +376,19 @@ class FloatingAssistantService : Service() {
                 val result = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                 if (result != null) handleRecognition(result) else scheduleWakeListening()
             }
-            override fun onPartialResults(p0: Bundle?) {}
-            override fun onEvent(p0: Int, p1: Bundle?) {}
+            override fun onPartialResults(results: Bundle?) {
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
+                results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.let(::showBubble)
+            }
+            override fun onEvent(p0: Int, p1: Bundle?) {
+                lastSpeechEventAt = SystemClock.elapsedRealtime()
+            }
         })
     }
     private fun initMediaSession() {
-        mediaSession = MediaSession(this, "J.A.R.V.I.S.").apply {
+        mediaSession = MediaSession(this, "NEO").apply {
             setCallback(object : MediaSession.Callback() {
                 override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
                     val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
@@ -314,7 +399,10 @@ class FloatingAssistantService : Service() {
                             KeyEvent.KEYCODE_MEDIA_PLAY,
                             KeyEvent.KEYCODE_MEDIA_PAUSE
                         ) && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                        restartSr()
+                        tts?.stop()
+                        speaking = false
+                        restartAfterSpeech = false
+                        activateListeningNow()
                         return true
                     }
                     return super.onMediaButtonEvent(mediaButtonIntent)
@@ -362,7 +450,7 @@ class FloatingAssistantService : Service() {
     private fun startSr() {
         if (listening || recognitionActive || pendingSrStart) return
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés nem indítható mikrofonengedély nélkül")
+            android.util.Log.e("NEO", "Hangfelismerés nem indítható mikrofonengedély nélkül")
             showBubble("Mikrofonengedély szükséges.")
             return
         }
@@ -380,7 +468,7 @@ class FloatingAssistantService : Service() {
                 }
             } else beginSr()
         } catch (e: SecurityException) {
-            android.util.Log.e("J.A.R.V.I.S.", "Bluetooth hangútvonal nem érhető el", e)
+            android.util.Log.e("NEO", "Bluetooth hangútvonal nem érhető el", e)
             beginSr()
         }
     }
@@ -391,22 +479,22 @@ class FloatingAssistantService : Service() {
         h.removeCallbacks(recognitionStartTimeout)
         if (listening) {
             try { sr?.cancel() } catch (e: Exception) {
-                android.util.Log.w("J.A.R.V.I.S.", "A korábbi hangfelismerés megszakítása sikertelen", e)
+                android.util.Log.w("NEO", "A korábbi hangfelismerés megszakítása sikertelen", e)
             }
         }
         sr?.destroy()
         sr = null
         listening = false
         recognitionActive = false
+        lastSpeechEventAt = SystemClock.elapsedRealtime()
         initSr()
         startSr()
+        updateHudAnimation()
     }
 
     private fun handleRecognition(raw: String) {
-        val trimmed = raw.trim()
-        val wakeMatch = wakeWordPattern.find(trimmed)
-        if (wakeMatch != null) {
-            val command = trimmed.substring(wakeMatch.range.last + 1).trim()
+        val command = NeoAssistantRules.stripWakeWord(raw)
+        if (command != null) {
             if (command.isEmpty()) {
                 activateListeningNow()
                 return
@@ -415,7 +503,7 @@ class FloatingAssistantService : Service() {
             scheduleWakeListening(recreateRecognizer = true)
             return
         }
-        runCmd(raw)
+        if (activeListening) runCmd(raw)
         scheduleWakeListening()
     }
 
@@ -431,6 +519,7 @@ class FloatingAssistantService : Service() {
         }
         activeListening = true
         thinking = false
+        lastSpeechEventAt = SystemClock.elapsedRealtime()
         h.removeCallbacks(activeListeningTimeout)
         h.postDelayed(activeListeningTimeout, 8_000L)
         updateHudAnimation()
@@ -451,8 +540,8 @@ class FloatingAssistantService : Service() {
     }
 
     private fun scheduleRecognitionRetry() {
-        val delayMillis = (700L * (1L shl consecutiveRecognitionErrors.coerceAtMost(5)))
-            .coerceAtMost(20_000L)
+        val delays = longArrayOf(400L, 800L, 1_500L)
+        val delayMillis = delays[consecutiveRecognitionErrors.coerceAtMost(delays.lastIndex)]
         consecutiveRecognitionErrors++
         scheduleWakeListening(delayMillis = delayMillis)
     }
@@ -469,17 +558,13 @@ class FloatingAssistantService : Service() {
     private fun beginSr() {
         val recognizer = sr
         if (recognizer == null) {
-            android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerő nem áll rendelkezésre")
+            android.util.Log.e("NEO", "Hangfelismerő nem áll rendelkezésre")
             return
         }
         try {
-            recognizerSoundsMuted = true
-            h.removeCallbacks(unmuteRecognizerSounds)
-            h.postDelayed(unmuteRecognizerSounds, 300L)
-            listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
-                audioManager.adjustStreamVolume(it, AudioManager.ADJUST_MUTE, 0)
-            }
             recognitionActive = true
+            lastSpeechEventAt = SystemClock.elapsedRealtime()
+            updateHudAnimation()
             recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU")
@@ -490,7 +575,7 @@ class FloatingAssistantService : Service() {
         catch (e: Exception) {
             h.removeCallbacks(recognitionStartTimeout)
             recognitionActive = false
-            android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e)
+            android.util.Log.e("NEO", "Hangfelismerés indítása sikertelen", e)
             showBubble("Mikrofon hiba: ${e.message ?: "indítás sikertelen"}")
             scheduleRecognitionRetry()
         }
@@ -499,14 +584,21 @@ class FloatingAssistantService : Service() {
         h.post {
             showBubble(t)
             val speech = t.trim().takeIf { it.isNotEmpty() } ?: return@post
-            val sentences = Regex("[^.!?]+[.!?]+|[^.!?]+$")
-                .findAll(speech)
-                .map { it.value.trim() }
-                .filter { it.isNotEmpty() }
-                .toList()
-            sentences.forEachIndexed { index, sentence ->
-                val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-                tts?.speak(sentence, queueMode, null, "jarvis-${System.nanoTime()}")
+            if (ttsReady) enqueueSpeech(speech) else pendingSpeech.addLast(speech)
+        }
+    }
+
+    private fun enqueueSpeech(speech: String) {
+        val sentences = Regex("[^.!?]+[.!?]+|[^.!?]+$")
+            .findAll(speech)
+            .map { it.value.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        sentences.forEachIndexed { index, sentence ->
+            val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            val result = tts?.speak(sentence, queueMode, null, "neo-${System.nanoTime()}")
+            if (result == TextToSpeech.ERROR) {
+                android.util.Log.e("NEO", "A TTS nem tudta sorba állítani a beszédet")
             }
         }
     }
@@ -527,11 +619,171 @@ class FloatingAssistantService : Service() {
         try {
             wm.updateViewLayout(bubble, bubbleParams)
             bubble.animate().alpha(1f).setDuration(180L).start()
-            h.postDelayed(hideBubble, 4_500L)
+            h.postDelayed(hideBubble, 5_000L)
         } catch (e: WindowManager.BadTokenException) {
-            android.util.Log.w("J.A.R.V.I.S.", "A HUD szövegbuborék nem jeleníthető meg", e)
+            android.util.Log.w("NEO", "A HUD szövegbuborék nem jeleníthető meg", e)
         }
     }
+    private fun captureImageAndAsk() {
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            say("A kamerához engedélyezd a hozzáférést a vezérlőpulton.")
+            return
+        }
+        val apiKey = try {
+            ApiKeyStore.read(this).orEmpty()
+        } catch (error: Exception) {
+            android.util.Log.e("NEO", "A mentett API-kulcs nem olvasható", error)
+            say("A mentett API-kulcs nem olvasható.")
+            return
+        }
+        if (!apiKey.startsWith("sk-or-")) {
+            say("A kamera AI-látásához OpenRouter API-kulcs szükséges.")
+            return
+        }
+        try {
+            val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setContentTitle("NEO aktív")
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .build()
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } catch (error: SecurityException) {
+            android.util.Log.e("NEO", "A kamerás előtérszolgáltatás nem indítható", error)
+            say("A kamerához szükséges szolgáltatásengedély hiányzik.")
+            return
+        }
+        showBubble("Képet készítek...")
+        captureCameraImage { jpeg ->
+            val encoded = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+            thread {
+                try {
+                    val answer = GeminiApi.generateVisionContent(
+                        apiKey,
+                        "Írd le röviden magyarul, mi látható a képen. Ne találj ki részleteket.",
+                        encoded
+                    )
+                    say(answer)
+                } catch (error: Exception) {
+                    android.util.Log.e("NEO", "A kamerakép elemzése sikertelen", error)
+                    say("A képet nem sikerült elemezni: ${error.message ?: "AI-hiba"}.")
+                }
+            }
+        }
+    }
+
+    private fun captureCameraImage(onCaptured: (ByteArray) -> Unit) {
+        val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+        val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
+            cameraManager.getCameraCharacteristics(id)
+                .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+        } ?: cameraManager.cameraIdList.firstOrNull()
+        if (cameraId == null) {
+            say("Kamera nem érhető el.")
+            return
+        }
+
+        val outputSize = cameraManager.getCameraCharacteristics(cameraId)
+            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?.getOutputSizes(android.graphics.ImageFormat.JPEG)
+            ?.filter { it.width <= 1280 && it.height <= 720 }
+            ?.maxByOrNull { it.width.toLong() * it.height }
+            ?: android.util.Size(1280, 720)
+        val cameraThread = HandlerThread("NEO-camera").apply { start() }
+        val cameraHandler = Handler(cameraThread.looper)
+        val reader = ImageReader.newInstance(
+            outputSize.width,
+            outputSize.height,
+            android.graphics.ImageFormat.JPEG,
+            1
+        )
+        var camera: CameraDevice? = null
+        var session: CameraCaptureSession? = null
+        var delivered = false
+        fun cleanup() {
+            session?.close()
+            camera?.close()
+            reader.close()
+            cameraThread.quitSafely()
+        }
+        reader.setOnImageAvailableListener({ imageReader ->
+            val image = imageReader.acquireLatestImage() ?: return@setOnImageAvailableListener
+            val bytes = image.planes[0].buffer.let { buffer ->
+                ByteArray(buffer.remaining()).also(buffer::get)
+            }
+            image.close()
+            if (!delivered) {
+                delivered = true
+                cleanup()
+                onCaptured(bytes)
+            }
+        }, cameraHandler)
+        cameraHandler.postDelayed({
+            if (!delivered) {
+                delivered = true
+                cleanup()
+                say("A kamera időtúllépés miatt nem készített képet.")
+            }
+        }, 8_000L)
+        try {
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(openedCamera: CameraDevice) {
+                    camera = openedCamera
+                    openedCamera.createCaptureSession(
+                        listOf(reader.surface),
+                        object : CameraCaptureSession.StateCallback() {
+                            override fun onConfigured(configuredSession: CameraCaptureSession) {
+                                session = configuredSession
+                                val request = openedCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                                    .apply { addTarget(reader.surface) }
+                                    .build()
+                                configuredSession.capture(request, null, cameraHandler)
+                            }
+
+                            override fun onConfigureFailed(failedSession: CameraCaptureSession) {
+                                if (!delivered) {
+                                    delivered = true
+                                    cleanup()
+                                    say("A kamera előkészítése sikertelen.")
+                                }
+                            }
+                        },
+                        cameraHandler
+                    )
+                }
+
+                override fun onDisconnected(disconnectedCamera: CameraDevice) {
+                    disconnectedCamera.close()
+                    if (!delivered) {
+                        delivered = true
+                        cleanup()
+                        say("A kamera megszakadt.")
+                    }
+                }
+
+                override fun onError(errorCamera: CameraDevice, errorCode: Int) {
+                    errorCamera.close()
+                    if (!delivered) {
+                        delivered = true
+                        cleanup()
+                        say("Kamera hiba: $errorCode.")
+                    }
+                }
+            }, cameraHandler)
+        } catch (error: Exception) {
+            cleanup()
+            android.util.Log.e("NEO", "Kamerakép készítése sikertelen", error)
+            say("A kamera nem indítható.")
+        }
+    }
+
     private fun app(pkg: String, n: String) { val i = packageManager.getLaunchIntentForPackage(pkg); if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); say("$n megnyitása.") } else say("$n nincs telepítve.") }
     private fun torch(on: Boolean) {
         if (checkSelfPermission(android.Manifest.permission.CAMERA) !=
@@ -553,13 +805,28 @@ class FloatingAssistantService : Service() {
             cameraManager.setTorchMode(cameraId, on)
             say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.")
         } catch (error: Exception) {
-            android.util.Log.e("J.A.R.V.I.S.", "A zseblámpa nem kapcsolható", error)
+            android.util.Log.e("NEO", "A zseblámpa nem kapcsolható", error)
             say("A zseblámpa nem kapcsolható.")
         }
     }
     private fun runCmd(raw: String) {
         val c = raw.lowercase(Locale("hu", "HU"))
         when {
+            c.startsWith("jegyezd meg ") -> {
+                val fact = raw.trim().substringAfter(' ').substringAfter(' ').trim()
+                if (fact.isEmpty()) {
+                    say("Mit jegyezzek meg?")
+                } else {
+                    val preferences = getSharedPreferences("neo_prefs", MODE_PRIVATE)
+                    val facts = preferences.getString("facts", "").orEmpty()
+                        .lines().filter(String::isNotBlank).toMutableList()
+                    facts.add(fact)
+                    if (!preferences.edit().putString("facts", facts.distinct().joinToString("\n")).commit()) {
+                        say("A tényt nem sikerült elmenteni.")
+                    } else say("Megjegyeztem: $fact")
+                }
+            }
+            "nézd meg" in c || "kamera" in c || "mit látsz" in c -> captureImageAndAsk()
             "idő" in c || "hány óra" in c || "mennyi az idő" in c -> say("Pontos idő: " + SimpleDateFormat("HH:mm", Locale("hu", "HU")).format(Date()))
             "akkumulátor" in c || "töltöttség" in c -> {
                 val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -608,7 +875,7 @@ class FloatingAssistantService : Service() {
                         )
                         say("Navigáció: $destination")
                     } catch (e: Exception) {
-                        android.util.Log.w("J.A.R.V.I.S.", "Navigáció nem indítható", e)
+                        android.util.Log.w("NEO", "Navigáció nem indítható", e)
                         say("Nincs elérhető navigációs alkalmazás.")
                     }
                 }
@@ -628,7 +895,7 @@ class FloatingAssistantService : Service() {
                         })
                         say("$minutes perces időzítő.")
                     } catch (error: Exception) {
-                        android.util.Log.e("J.A.R.V.I.S.", "Az időzítő nem indítható", error)
+                        android.util.Log.e("NEO", "Az időzítő nem indítható", error)
                         say("Az időzítőt nem sikerült beállítani.")
                     }
                 }
@@ -650,7 +917,7 @@ class FloatingAssistantService : Service() {
                         })
                         say("Ébresztő beállítva.")
                     } catch (error: Exception) {
-                        android.util.Log.e("J.A.R.V.I.S.", "Az ébresztő nem indítható", error)
+                        android.util.Log.e("NEO", "Az ébresztő nem indítható", error)
                         say("Az ébresztőt nem sikerült beállítani.")
                     }
                 }
@@ -667,7 +934,7 @@ class FloatingAssistantService : Service() {
                     })
                     say("Emlékeztető: $title")
                 } catch (error: Exception) {
-                    android.util.Log.e("J.A.R.V.I.S.", "Az emlékeztető nem indítható", error)
+                    android.util.Log.e("NEO", "Az emlékeztető nem indítható", error)
                     say("Az emlékeztetőt nem sikerült megnyitni.")
                 }
             }
@@ -679,7 +946,7 @@ class FloatingAssistantService : Service() {
         val k = try {
             ApiKeyStore.read(this).orEmpty()
         } catch (error: Exception) {
-            android.util.Log.e("J.A.R.V.I.S.", "A mentett API-kulcs nem olvasható", error)
+            android.util.Log.e("NEO", "A mentett API-kulcs nem olvasható", error)
             say("A mentett API-kulcs nem olvasható. Nyisd meg a vezérlőpultot.")
             return
         }
@@ -689,31 +956,46 @@ class FloatingAssistantService : Service() {
         say("Pillanat...")
         thread {
             try {
-                val prompt = synchronized(hist) {
+                val preferences = getSharedPreferences("neo_prefs", MODE_PRIVATE)
+                val facts = preferences.getString("facts", "").orEmpty().trim()
+                val (prompt, conversationMemory) = synchronized(hist) {
                     val now = System.currentTimeMillis()
                     if (now - historyUpdatedAt > 10 * 60 * 1000L) hist.clear()
-                    while (hist.size >= 12) {
-                        hist.removeFirst()
-                        if (hist.isNotEmpty()) hist.removeFirst()
-                    }
                     hist.addLast("Felhasználó: $q")
                     historyUpdatedAt = now
-                    "Te J.A.R.V.I.S. magyar hangasszisztens vagy. Válaszolj 2 rövid, tömör mondatban, formázás nélkül.\n" +
-                        hist.joinToString("\n")
+                    Pair(q, hist.toList().dropLast(1))
                 }
-                val ans = GeminiApi.generateContent(k, prompt).replace("*", "").trim()
+                val childFriendly = NeoAssistantRules.isChildFriendlyTopic(q)
+                val systemPrompt = buildString {
+                    append(
+                        if (childFriendly) {
+                            "Te NEO vagy. Egy 6–8 éves gyerekhez beszélsz: légy vidám, kedves, egyszerű, " +
+                                "szakszavak nélküli, rövid és biztonságos. Markdown nélkül válaszolj."
+                        } else {
+                            "Te NEO vagy, egy magyar, tárgyilagos és gyakorlatias hangasszisztens. " +
+                                "Alapértelmezésben adj rövid, 1–3 mondatos választ. " +
+                                "Markdown és felsorolás nélkül írj, hogy a magyar TTS természetesen olvassa fel."
+                        }
+                    )
+                    if (facts.isNotEmpty()) append("\nTartósan megjegyzett tények:\n").append(facts)
+                    if (conversationMemory.isNotEmpty()) {
+                        append("\nAz előző legfeljebb hat üzenetpár:\n")
+                            .append(conversationMemory.joinToString("\n"))
+                    }
+                }
+                val ans = GeminiApi.generateContent(k, prompt, systemPrompt).replace("*", "").trim()
                 synchronized(hist) {
                     while (hist.size >= 12) {
                         hist.removeFirst()
                         if (hist.isNotEmpty()) hist.removeFirst()
                     }
-                    hist.addLast("J.A.R.V.I.S.: $ans")
+                    hist.addLast("NEO: $ans")
                     historyUpdatedAt = System.currentTimeMillis()
                 }
                 h.post { thinking = false; updateHudAnimation() }
                 say(ans)
             } catch (e: Exception) {
-                android.util.Log.e("J.A.R.V.I.S.", "Gemini kérés sikertelen az összes modellen", e)
+                android.util.Log.e("NEO", "AI-kérés sikertelen", e)
                 h.post {
                     thinking = false
                     updateHudAnimation()
@@ -723,21 +1005,40 @@ class FloatingAssistantService : Service() {
             }
         }
     }
-    private fun currentHudState(): HudState = when {
-        speaking -> HudState.SPEAKING
-        thinking -> HudState.THINKING
-        activeListening -> HudState.LISTENING
-        else -> HudState.IDLE
+    private fun currentHudState(): NeoHudState = when {
+        speaking -> NeoHudState.SPEAKING
+        thinking -> NeoHudState.THINKING
+        activeListening -> NeoHudState.LISTENING
+        else -> NeoHudState.IDLE
     }
 
     private fun updateHudAnimation() {
+        synchronized(this) {
+            assistantState = when {
+                speaking -> AssistantState.SPEAKING
+                thinking -> AssistantState.PROCESSING
+                activeListening -> AssistantState.ACTIVE_LISTENING
+                listening || recognitionActive || pendingSrStart -> AssistantState.WAKE_WORD_LISTENING
+                else -> AssistantState.IDLE
+            }
+        }
         if (::icon.isInitialized) icon.setHudState(docked, currentHudState())
+        sendHudUpdate()
+    }
+
+    private fun sendHudUpdate(rms: Float? = null) {
+        val intent = Intent(ACTION_HUD_UPDATE)
+            .setPackage(packageName)
+            .putExtra(EXTRA_HUD_STATE, currentHudState().name)
+        if (rms != null) intent.putExtra(EXTRA_HUD_RMS, rms)
+        sendBroadcast(intent)
     }
     private inner class ReactorHudView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var isDocked = true
-        private var hudState = HudState.IDLE
+        private var hudState = NeoHudState.IDLE
         private var pulse = 0.5f
+        private var rms = 0f
         private val pulseAnimator = ValueAnimator.ofFloat(0.35f, 1f).apply {
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
@@ -754,15 +1055,20 @@ class FloatingAssistantService : Service() {
             setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }
 
-        fun setHudState(docked: Boolean, state: HudState) {
+        fun setHudState(docked: Boolean, state: NeoHudState) {
             isDocked = docked
             hudState = state
             pulseAnimator.duration = when (state) {
-                HudState.IDLE -> 1_700L
-                HudState.LISTENING -> 620L
-                HudState.THINKING -> 1_050L
-                HudState.SPEAKING -> 850L
+                NeoHudState.IDLE -> 1_700L
+                NeoHudState.LISTENING -> 620L
+                NeoHudState.THINKING -> 1_050L
+                NeoHudState.SPEAKING -> 850L
             }
+            invalidate()
+        }
+
+        fun setRms(value: Float) {
+            rms = value.coerceIn(0f, 10f) / 10f
             invalidate()
         }
 
@@ -771,10 +1077,10 @@ class FloatingAssistantService : Service() {
             val cx = width / 2f
             val cy = height / 2f
             val accent = when (hudState) {
-                HudState.IDLE -> Color.rgb(90, 220, 232)
-                HudState.LISTENING -> Color.rgb(0, 230, 118)
-                HudState.THINKING -> Color.rgb(0, 229, 255)
-                HudState.SPEAKING -> Color.rgb(255, 179, 0)
+                NeoHudState.IDLE -> Color.rgb(90, 220, 232)
+                NeoHudState.LISTENING -> Color.rgb(0, 230, 118)
+                NeoHudState.THINKING -> Color.rgb(0, 229, 255)
+                NeoHudState.SPEAKING -> Color.rgb(255, 179, 0)
             }
             val cyan = Color.rgb(0, 229, 255)
             val green = accent
@@ -824,7 +1130,7 @@ class FloatingAssistantService : Service() {
                 canvas.drawArc(bounds, 112f, 112f, false, paint)
                 canvas.drawArc(bounds, 245f, 55f, false, paint)
                 paint.style = Paint.Style.FILL
-                val coreRadius = radius * (0.17f + pulse * 0.035f)
+                val coreRadius = radius * (0.17f + pulse * 0.035f + rms * 0.04f)
                 paint.shader = RadialGradient(
                     cx, cy, coreRadius * 1.8f,
                     intArrayOf(Color.WHITE, accent, cyan, Color.argb(0, 0, 229, 255)),
@@ -849,15 +1155,9 @@ class FloatingAssistantService : Service() {
         h.removeCallbacks(recognitionStartTimeout)
         h.removeCallbacks(hideBubble)
         h.removeCallbacks(scoStartTimeout)
-        h.removeCallbacks(unmuteRecognizerSounds)
-        if (recognizerSoundsMuted) {
-            listOf(AudioManager.STREAM_SYSTEM, AudioManager.STREAM_NOTIFICATION).forEach {
-                audioManager.adjustStreamVolume(it, AudioManager.ADJUST_UNMUTE, 0)
-            }
-            recognizerSoundsMuted = false
-        }
+        h.removeCallbacks(watchdog)
         if (scoReceiverRegistered) {
-            try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("J.A.R.V.I.S.", "SCO receiver was already unregistered", e) }
+            try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("NEO", "SCO receiver was already unregistered", e) }
         }
         mediaSession?.run { isActive = false; release() }
         mediaSession = null

@@ -20,30 +20,52 @@ internal object GeminiApi {
         "gemini-2.5-flash"
     )
 
-    fun generateContent(apiKey: String, prompt: String): String {
+    fun generateContent(
+        apiKey: String,
+        prompt: String,
+        systemPrompt: String = "Te NEO vagy, egy magyar hangasszisztens."
+    ): String {
         return when {
-            apiKey.startsWith("sk-or-") -> generateOpenRouterContent(apiKey, prompt)
+            apiKey.startsWith("sk-or-") -> generateOpenRouterContent(apiKey, prompt, systemPrompt)
             apiKey.startsWith("sk-") -> chatCompletion(
                 "https://api.openai.com/v1/chat/completions",
                 apiKey,
                 "gpt-4o-mini",
                 prompt,
-                "OpenAI"
+                "OpenAI",
+                systemPrompt
             )
             apiKey.startsWith("gsk_") -> chatCompletion(
                 "https://api.groq.com/openai/v1/chat/completions",
                 apiKey,
                 "llama-3.3-70b-versatile",
                 prompt,
-                "Groq"
+                "Groq",
+                systemPrompt
             )
             apiKey.startsWith("AIza") || apiKey.startsWith("AQ.") ->
-                generateGeminiContent(apiKey, prompt)
+                generateGeminiContent(apiKey, prompt, systemPrompt)
             else -> throw IOException("Unsupported API key format")
         }
     }
 
-    private fun generateOpenRouterContent(apiKey: String, prompt: String): String {
+    fun generateVisionContent(apiKey: String, prompt: String, imageBase64: String): String {
+        if (!apiKey.startsWith("sk-or-")) {
+            throw IOException("A kamerás AI-látáshoz OpenRouter API-kulcs szükséges")
+        }
+        return chatCompletionWithImage(
+            apiKey,
+            prompt,
+            imageBase64,
+            "google/gemma-3-27b-it:free"
+        )
+    }
+
+    private fun generateOpenRouterContent(
+        apiKey: String,
+        prompt: String,
+        systemPrompt: String
+    ): String {
         var lastFailure: Exception? = null
         openRouterModels.forEach { model ->
             try {
@@ -52,7 +74,8 @@ internal object GeminiApi {
                     apiKey,
                     model,
                     prompt,
-                    "OpenRouter"
+                    "OpenRouter",
+                    systemPrompt
                 )
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
@@ -67,14 +90,18 @@ internal object GeminiApi {
         )
     }
 
-    private fun generateGeminiContent(apiKey: String, prompt: String): String {
+    private fun generateGeminiContent(
+        apiKey: String,
+        prompt: String,
+        systemPrompt: String
+    ): String {
         var lastFailure: Exception? = null
         var throttled = false
 
         for (round in 0..1) {
             models.forEachIndexed { index, model ->
                 try {
-                    return request(apiKey, model, prompt)
+                    return request(apiKey, model, prompt, systemPrompt)
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw e
@@ -111,7 +138,8 @@ internal object GeminiApi {
         apiKey: String,
         model: String,
         prompt: String,
-        provider: String
+        provider: String,
+        systemPrompt: String
     ): String {
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             connectTimeout = 12_000
@@ -127,11 +155,9 @@ internal object GeminiApi {
                 .put("model", model)
                 .put(
                     "messages",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("role", "user")
-                            .put("content", prompt)
-                    )
+                    JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", systemPrompt))
+                        .put(JSONObject().put("role", "user").put("content", prompt))
                 )
             connection.outputStream.use {
                 it.write(body.toString().toByteArray(Charsets.UTF_8))
@@ -162,7 +188,71 @@ internal object GeminiApi {
         }
     }
 
-    private fun request(apiKey: String, model: String, prompt: String): String {
+    private fun chatCompletionWithImage(
+        apiKey: String,
+        prompt: String,
+        imageBase64: String,
+        model: String
+    ): String {
+        val connection = (URL("https://openrouter.ai/api/v1/chat/completions")
+            .openConnection() as HttpURLConnection).apply {
+            connectTimeout = 12_000
+            readTimeout = 30_000
+            requestMethod = "POST"
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("Content-Type", "application/json")
+            doOutput = true
+        }
+        try {
+            val content = JSONArray()
+                .put(JSONObject().put("type", "text").put("text", prompt))
+                .put(
+                    JSONObject()
+                        .put("type", "image_url")
+                        .put(
+                            "image_url",
+                            JSONObject().put("url", "data:image/jpeg;base64,$imageBase64")
+                        )
+                )
+            val body = JSONObject().put("model", model).put(
+                "messages",
+                JSONArray().put(
+                    JSONObject().put("role", "user").put("content", content)
+                )
+            )
+            connection.outputStream.use {
+                it.write(body.toString().toByteArray(Charsets.UTF_8))
+            }
+            val responseCode = connection.responseCode
+            val responseStream = if (responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream
+                    ?: throw ChatCompletionHttpException("OpenRouter", responseCode, "")
+            }
+            val responseBody = responseStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            if (responseCode !in 200..299) {
+                throw ChatCompletionHttpException("OpenRouter", responseCode, responseBody)
+            }
+            return JSONObject(responseBody)
+                .getJSONArray("choices")
+                .getJSONObject(0)
+                .getJSONObject("message")
+                .getString("content")
+                .trim()
+                .takeIf { it.isNotEmpty() }
+                ?: throw IOException("OpenRouter returned an empty vision response")
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun request(
+        apiKey: String,
+        model: String,
+        prompt: String,
+        systemPrompt: String
+    ): String {
         val url = URL(
             "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
         )
@@ -176,15 +266,20 @@ internal object GeminiApi {
         }
 
         try {
-            val body = JSONObject().put(
-                "contents",
-                JSONArray().put(
+            val body = JSONObject()
+                .put(
+                    "systemInstruction",
+                    JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt)))
+                )
+                .put(
+                    "contents",
+                    JSONArray().put(
                     JSONObject().put(
                         "parts",
                         JSONArray().put(JSONObject().put("text", prompt))
                     )
                 )
-            )
+                )
             connection.outputStream.use {
                 it.write(body.toString().toByteArray(Charsets.UTF_8))
             }

@@ -32,7 +32,7 @@ class MediaButtonReceiver : BroadcastReceiver() {
             android.content.pm.PackageManager.PERMISSION_GRANTED ||
             !Settings.canDrawOverlays(context)
         ) {
-            android.util.Log.w("J.A.R.V.I.S.", "Headset-gomb figyelmen kívül hagyva: hiányzó mikrofon- vagy lebegőablak-engedély")
+            android.util.Log.w("NEO", "Headset-gomb figyelmen kívül hagyva: hiányzó mikrofon- vagy lebegőablak-engedély")
             return
         }
 

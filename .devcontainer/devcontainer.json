@@ -1,0 +1,23 @@
+{
+  "name": "NEO Android development",
+  "image": "ghcr.io/cirruslabs/android-sdk:36",
+  "features": {
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "21"
+    },
+    "ghcr.io/devcontainers/features/gradle:1": {
+      "version": "9.3.1"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "fwcd.kotlin",
+        "GitHub.copilot",
+        "GitHub.copilot-chat"
+      ]
+    }
+  },
+  "postCreateCommand": "yes | sdkmanager --licenses >/dev/null && sdkmanager 'platforms;android-36' 'build-tools;36.1.0' 'platform-tools' && mkdir -p \"$HOME/.android\" && if [ ! -f \"$HOME/.android/debug.keystore\" ]; then keytool -genkeypair -v -keystore \"$HOME/.android/debug.keystore\" -storepass android -alias androiddebugkey -keypass android -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000; fi"
+}

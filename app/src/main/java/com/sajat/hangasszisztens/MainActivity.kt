@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Canvas
@@ -31,9 +32,25 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
+    private val diagnosticDots = mutableMapOf<String, View>()
+    private lateinit var hudView: NeoHudView
+    private var hudReceiverRegistered = false
+    private val hudReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != FloatingAssistantService.ACTION_HUD_UPDATE) return
+            intent.getStringExtra(FloatingAssistantService.EXTRA_HUD_STATE)
+                ?.let { state -> NeoHudState.values().firstOrNull { it.name == state } }
+                ?.let(hudView::setState)
+            if (intent.hasExtra(FloatingAssistantService.EXTRA_HUD_RMS)) {
+                hudView.setRms(intent.getFloatExtra(FloatingAssistantService.EXTRA_HUD_RMS, 0f))
+            }
+        }
+    }
+
     companion object {
         private const val REQUEST_PERMISSION_SETUP = 1
         private const val REQUEST_START_PERMISSIONS = 2
@@ -92,11 +109,22 @@ class MainActivity : AppCompatActivity() {
                 }
                 false
             }
-            setOnClickListener { onClick() }
+            setOnClickListener {
+                val vibrator = getSystemService(VIBRATOR_SERVICE) as android.os.Vibrator
+                if (vibrator.hasVibrator()) {
+                    vibrator.vibrate(
+                        android.os.VibrationEffect.createOneShot(
+                            35L,
+                            android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                        )
+                    )
+                }
+                onClick()
+            }
         }
 
         content.addView(TextView(this).apply {
-            text = "J.A.R.V.I.S.\nVEZÉRLŐPULT"
+            text = "NEO\nVEZÉRLŐPULT"
             textSize = 24f
             letterSpacing = 0.08f
             setTextColor(Color.parseColor("#E8FFF5"))
@@ -104,6 +132,13 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, dp(20))
         })
+        hudView = NeoHudView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, dp(176)).apply {
+                setMargins(0, 0, 0, dp(12))
+            }
+        }
+        content.addView(hudView)
+        content.addView(diagnosticsPanel())
 
         content.addView(button(
             "VERZIÓ ${BuildConfig.VERSION_NAME} · FRISSÍTÉSI NAPLÓ",
@@ -130,7 +165,7 @@ class MainActivity : AppCompatActivity() {
                         "1.1\n" +
                         "• APK-aláírási és buildfolyamat-javítások.\n\n" +
                         "1.0\n" +
-                        "• Az első J.A.R.V.I.S. hangasszisztens, lebegő ikon és alapvető hangparancsok."
+                        "• Az első NEO hangasszisztens, lebegő ikon és alapvető hangparancsok."
                 )
                 .setPositiveButton("MAKRÓ-INTEGRÁCIÓ") { _, _ ->
                     showMacroIntegrationInfo()
@@ -146,7 +181,7 @@ class MainActivity : AppCompatActivity() {
             showMacroIntegrationInfo()
         })
 
-        content.addView(button("1. ENGEDÉLYEK: MIKROFON + EXTRÁK") {
+        content.addView(button("1. MIKROFON + KAMERA + BLUETOOTH + ÉRTESÍTÉSEK") {
             ActivityCompat.requestPermissions(
                 this,
                 startupPermissions().toTypedArray(),
@@ -166,6 +201,20 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         })
+        content.addView(button(
+            "3. AKKUMULÁTOR-KORLÁT FELOLDÁSA",
+            borderColor = Color.parseColor("#00E5FF")
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val powerManager = getSystemService(POWER_SERVICE) as android.os.PowerManager
+                if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                    startActivity(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(Uri.parse("package:$packageName"))
+                    )
+                }
+            }
+        })
 
         val input = EditText(this).apply {
             hint = "API-kulcs (OpenRouter / Gemini / OpenAI / Groq)"
@@ -175,7 +224,7 @@ class MainActivity : AppCompatActivity() {
             val savedKey = try {
                 ApiKeyStore.read(this@MainActivity)
             } catch (error: Exception) {
-                android.util.Log.e("J.A.R.V.I.S.", "A mentett API-kulcs nem olvasható", error)
+                android.util.Log.e("NEO", "A mentett API-kulcs nem olvasható", error)
                 Toast.makeText(this@MainActivity, "A mentett API-kulcs nem olvasható.", Toast.LENGTH_LONG).show()
                 null
             }
@@ -212,7 +261,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 ApiKeyStore.write(this, key)
             } catch (error: Exception) {
-                android.util.Log.e("J.A.R.V.I.S.", "Az API-kulcs mentése sikertelen", error)
+                android.util.Log.e("NEO", "Az API-kulcs mentése sikertelen", error)
                 status.text = "Hiba: az API-kulcs biztonságos mentése sikertelen."
                 return@button
             }
@@ -250,6 +299,107 @@ class MainActivity : AppCompatActivity() {
             addView(content)
         }, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+        for (index in 0 until content.childCount) {
+            val child = content.getChildAt(index)
+            child.alpha = 0f
+            child.translationY = dp(18).toFloat()
+            child.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setStartDelay(index * 70L)
+                .setDuration(320L)
+                .start()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!hudReceiverRegistered) {
+            ContextCompat.registerReceiver(
+                this,
+                hudReceiver,
+                android.content.IntentFilter(FloatingAssistantService.ACTION_HUD_UPDATE),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            hudReceiverRegistered = true
+        }
+        refreshDiagnostics()
+    }
+
+    override fun onPause() {
+        if (hudReceiverRegistered) {
+            unregisterReceiver(hudReceiver)
+            hudReceiverRegistered = false
+        }
+        super.onPause()
+    }
+
+    private fun diagnosticsPanel(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = GradientDrawable().apply {
+            cornerRadius = dp(16).toFloat()
+            setColor(Color.parseColor("#AA050A18"))
+            setStroke(dp(1), Color.parseColor("#5500E5FF"))
+        }
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        addView(TextView(this@MainActivity).apply {
+            text = "ÉLŐ DIAGNOSZTIKA"
+            textSize = 11f
+            letterSpacing = 0.12f
+            setTextColor(Color.parseColor("#8FEAFF"))
+        })
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            listOf("MIKROFON", "KAMERA", "HUD", "AKKU").forEach { label ->
+                val item = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+                }
+                val dot = View(this@MainActivity).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.parseColor("#FF5252"))
+                    }
+                    layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+                        bottomMargin = dp(4)
+                    }
+                }
+                item.addView(dot)
+                item.addView(TextView(this@MainActivity).apply {
+                    text = label
+                    textSize = 9f
+                    setTextColor(Color.WHITE)
+                })
+                diagnosticDots[label] = dot
+                addView(item)
+            }
+        })
+    }
+
+    private fun refreshDiagnostics() {
+        val microphoneReady = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val cameraReady = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val hudReady = Settings.canDrawOverlays(this)
+        val batteryReady = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            (getSystemService(POWER_SERVICE) as android.os.PowerManager)
+                .isIgnoringBatteryOptimizations(packageName)
+        mapOf(
+            "MIKROFON" to microphoneReady,
+            "KAMERA" to cameraReady,
+            "HUD" to hudReady,
+            "AKKU" to batteryReady
+        ).forEach { (label, ready) ->
+            (diagnosticDots[label]?.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (ready) "#00E676" else "#FF5252")
+            )
+        }
     }
 
     private fun showMacroIntegrationInfo() {
