@@ -112,10 +112,25 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle("Frissítési napló · ${BuildConfig.VERSION_NAME}")
                 .setMessage(
-                    "• Az API-kulcs titkosított tárolást kapott, és kimarad a biztonsági mentésekből.\n\n" +
-                        "• A hangfelismerés párhuzamos indítás elleni védelmet és fokozatos újrapróbálkozást kapott.\n\n" +
-                        "• Az időzítő és ébresztő ellenőrzi a megadott értékeket, a hibákról magyar visszajelzést ad.\n\n" +
-                        "• A headsetgomb-vevő már nem érhető el közvetlenül külső alkalmazások számára."
+                    "1.4.2 (aktuális)\n" +
+                        "• Android 14+ mikrofonos előtérszolgáltatás a hangfelismeréshez.\n" +
+                        "• Javított lebegőgomb-érintés, magyar hallgatási és mikrofonhiba-visszajelzés.\n" +
+                        "• A hangfelismerés már nem kényszeríti ki az offline nyelvi modellt.\n" +
+                        "• A mikrofon az indításhoz kötelező; a Bluetooth, kamera és értesítések külön engedélyezhetők.\n\n" +
+                        "1.4.1\n" +
+                        "• Keskeny, dokkolható lebegő vezérlő és 3D HUD-ikon.\n" +
+                        "• Bluetooth headsetgomb- és hangútvonal-támogatás.\n\n" +
+                        "1.3\n" +
+                        "• API-kulcs titkosított tárolása és kizárása a biztonsági mentésekből.\n" +
+                        "• Időzítő- és ébresztőértékek ellenőrzése, hibajelzések.\n" +
+                        "• Makró-broadcast tájékoztató és headset-vevő korlátozása.\n\n" +
+                        "1.2\n" +
+                        "• Gemini-válaszok és modell-visszaesési kezelés.\n" +
+                        "• Lebegő HUD és magyar hangasszisztens-parancsok fejlesztése.\n\n" +
+                        "1.1\n" +
+                        "• APK-aláírási és buildfolyamat-javítások.\n\n" +
+                        "1.0\n" +
+                        "• Az első J.A.R.V.I.S. hangasszisztens, lebegő ikon és alapvető hangparancsok."
                 )
                 .setPositiveButton("MAKRÓ-INTEGRÁCIÓ") { _, _ ->
                     showMacroIntegrationInfo()
@@ -131,7 +146,7 @@ class MainActivity : AppCompatActivity() {
             showMacroIntegrationInfo()
         })
 
-        content.addView(button("1. MIKROFON + BLUETOOTH + ÉRTESÍTÉS") {
+        content.addView(button("1. ENGEDÉLYEK: MIKROFON + EXTRÁK") {
             ActivityCompat.requestPermissions(
                 this,
                 startupPermissions().toTypedArray(),
@@ -153,7 +168,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         val input = EditText(this).apply {
-            hint = "API-kulcs (OpenRouter sk-or-... / Gemini / OpenAI)"
+            hint = "API-kulcs (OpenRouter / Gemini / OpenAI / Groq)"
             setHintTextColor(Color.parseColor("#91A7B8"))
             setTextColor(Color.WHITE)
             setShadowLayer(dp(1).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
@@ -263,19 +278,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun startupPermissions(): List<String> = buildList {
         add(Manifest.permission.RECORD_AUDIO)
+        add(Manifest.permission.CAMERA)
         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
     }
 
     private fun startAssistantWhenReady() {
-        val missingPermissions = startupPermissions().filter {
-            ActivityCompat.checkSelfPermission(this, it) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-        }
-        if (missingPermissions.isNotEmpty()) {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
             ActivityCompat.requestPermissions(
                 this,
-                missingPermissions.toTypedArray(),
+                arrayOf(Manifest.permission.RECORD_AUDIO),
                 REQUEST_START_PERMISSIONS
             )
             return
@@ -302,16 +316,34 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_PERMISSION_SETUP) {
+            val microphoneGranted = ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            Toast.makeText(
+                this,
+                if (microphoneGranted) {
+                    "A mikrofon engedélyezve. A kamera, Bluetooth és értesítés opcionális."
+                } else {
+                    "A mikrofonhoz az Android engedélykérése szükséges; ezt az alkalmazás nem kapcsolhatja be helyetted."
+                },
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         if (requestCode != REQUEST_START_PERMISSIONS) return
 
-        if (startupPermissions().all {
-                ActivityCompat.checkSelfPermission(this, it) ==
-                    android.content.pm.PackageManager.PERMISSION_GRANTED
-            }
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             startAssistantWhenReady()
         } else {
-            Toast.makeText(this, "Az asszisztens indításához szükséges engedélyek hiányoznak.", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                "A mikrofon engedélyezése szükséges. Ha az ablak nem jelenik meg, engedélyezd az alkalmazás beállításaiban.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 

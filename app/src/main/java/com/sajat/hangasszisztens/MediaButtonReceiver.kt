@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import android.view.KeyEvent
@@ -29,15 +28,11 @@ class MediaButtonReceiver : BroadcastReceiver() {
         )
         if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0 || !supportedKey) return
 
-        val requiredPermissions = buildList {
-            add(Manifest.permission.RECORD_AUDIO)
-            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
-            if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-        if (requiredPermissions.any { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED } ||
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED ||
             !Settings.canDrawOverlays(context)
         ) {
-            android.util.Log.w("J.A.R.V.I.S.", "Headset-gomb figyelmen kívül hagyva: hiányzó engedély")
+            android.util.Log.w("J.A.R.V.I.S.", "Headset-gomb figyelmen kívül hagyva: hiányzó mikrofon- vagy lebegőablak-engedély")
             return
         }
 

@@ -1,5 +1,7 @@
 package com.sajat.hangasszisztens
-import android.animation.ValueAnimator; import android.app.*; import android.content.*; import android.graphics.*; import android.graphics.drawable.GradientDrawable; import android.hardware.camera2.CameraManager; import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.view.*; import android.view.animation.AccelerateDecelerateInterpolator; import android.widget.*; import androidx.core.app.NotificationCompat; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs; import kotlin.math.min
+import android.animation.ValueAnimator; import android.app.*; import android.content.*; import android.graphics.*; import android.graphics.drawable.GradientDrawable; import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager; import android.net.Uri; import android.os.*; import android.provider.*; import android.speech.*; import android.speech.tts.TextToSpeech; import android.view.*; import android.view.animation.AccelerateDecelerateInterpolator; import android.widget.*; import androidx.core.app.NotificationCompat; import java.text.SimpleDateFormat; import java.util.*; import kotlin.concurrent.thread; import kotlin.math.abs; import kotlin.math.min
+import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -8,10 +10,13 @@ import android.media.session.PlaybackState
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import androidx.core.content.ContextCompat
+import androidx.core.app.ServiceCompat
 class FloatingAssistantService : Service() {
     companion object {
         const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
         const val ACTION_MACRO_COMMAND = "com.sajat.hangasszisztens.MACRO_COMMAND"
+        private const val NOTIFICATION_ID = 1
+        private const val NOTIFICATION_CHANNEL_ID = "jarvis_ch"
     }
 
     private enum class HudState { IDLE, LISTENING, THINKING, SPEAKING }
@@ -40,6 +45,16 @@ class FloatingAssistantService : Service() {
     private val activeListeningTimeout = Runnable {
         activeListening = false
         updateHudAnimation()
+    }
+    private val recognitionStartTimeout = Runnable {
+        if (recognitionActive && !listening) {
+            recognitionActive = false
+            showBubble("A hangfelismerő nem válaszol.")
+            val recognizer = sr
+            sr = null
+            recognizer?.destroy()
+            scheduleRecognitionRetry()
+        }
     }
     private val hideBubble = Runnable {
         if (::bubble.isInitialized) {
@@ -86,7 +101,19 @@ class FloatingAssistantService : Service() {
             return START_NOT_STICKY
         }
 
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("J.A.R.V.I.S. aktív")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .build()
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        )
+
         if (intent?.action == ACTION_START_LISTENING) restartSr()
+        else startSr()
         return START_STICKY
     }
 
@@ -100,8 +127,15 @@ class FloatingAssistantService : Service() {
             checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) audioManager.communicationDevice else null
-        val ch = "jarvis_ch"; if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(ch, "J.A.R.V.I.S.", NotificationManager.IMPORTANCE_LOW))
-        startForeground(1, NotificationCompat.Builder(this, ch).setContentTitle("J.A.R.V.I.S. aktív").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
+        if (Build.VERSION.SDK_INT >= 26) {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "J.A.R.V.I.S.",
+                    NotificationManager.IMPORTANCE_LOW
+                )
+            )
+        }
         if (!Settings.canDrawOverlays(this) ||
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -173,7 +207,7 @@ class FloatingAssistantService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
         wm.addView(closeBtn, closeParams); wm.addView(root, params); wm.addView(bubble, bubbleParams)
-        dock(); touch(); initSr(); initMediaSession(); startSr()
+        dock(); touch(); initSr(); initMediaSession()
     }
     private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#AA060B19")); setStroke(dp(1f), Color.parseColor("#7700E676")) }
     private fun dock() { docked = true; root.background = null; icon.setHudState(true, currentHudState()); params.width = dp(22f); params.height = dp(145f); params.x = if (right) sw - dp(22f) else 0; try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
@@ -194,16 +228,22 @@ class FloatingAssistantService : Service() {
                 MotionEvent.ACTION_DOWN -> { sx = params.x; sy = params.y; tx = e.rawX; ty = e.rawY; drag = false; true }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - tx; val dy = e.rawY - ty
-                    if (!drag && (abs(dx) > 35 || abs(dy) > 35)) { drag = true; if (docked) undock(); closeBtn.visibility = View.VISIBLE }
+                    if (!drag && (abs(dx) >= 15 || abs(dy) >= 15)) { drag = true; if (docked) undock(); closeBtn.visibility = View.VISIBLE }
                     if (drag) { params.x = (sx + dx.toInt()).coerceIn(0, sw - params.width); params.y = (sy + dy.toInt()).coerceIn(dp(24f), sh - params.height - dp(24f)); try { wm.updateViewLayout(root, params) } catch (_: Exception) {} }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     closeBtn.visibility = View.GONE
-                    if (drag) {
+                    if (abs(e.rawX - tx) < 15f && abs(e.rawY - ty) < 15f) {
+                        tts?.stop()
+                        speaking = false
+                        restartAfterSpeech = false
+                        if (docked) undock()
+                        activateListeningNow()
+                    } else if (drag) {
                         if (e.rawY > sh - dp(125f) && abs(e.rawX - sw / 2f) < dp(75f)) stopSelf()
                         else if (e.rawX < 65 || e.rawX > sw - 65) { right = e.rawX >= sw / 2f; dock() }
-                    } else { tts?.stop(); if (docked) undock(); activateListening() }
+                    }
                     true
                 }
                 else -> false
@@ -213,6 +253,7 @@ class FloatingAssistantService : Service() {
     private fun initSr() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             android.util.Log.e("J.A.R.V.I.S.", "A készüléken nem érhető el hangfelismerő")
+            showBubble("Nincs elérhető hangfelismerő.")
             return
         }
         val recognizer = SpeechRecognizer.createSpeechRecognizer(this)
@@ -220,9 +261,11 @@ class FloatingAssistantService : Service() {
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(p0: Bundle?) {
                 if (sr !== recognizer) return
+                h.removeCallbacks(recognitionStartTimeout)
                 listening = true
                 icon.alpha = 0.7f
                 updateHudAnimation()
+                showBubble("Hallgatlak...")
             }
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(p0: Float) {}
@@ -235,15 +278,18 @@ class FloatingAssistantService : Service() {
             }
             override fun onError(p0: Int) {
                 if (sr !== recognizer) return
+                h.removeCallbacks(recognitionStartTimeout)
                 listening = false
                 recognitionActive = false
                 icon.alpha = 1f
                 updateHudAnimation()
                 android.util.Log.w("J.A.R.V.I.S.", "A hangfelismerés leállt hibával: $p0")
-                scheduleRecognitionRetry()
+                showBubble("Mikrofon hiba: $p0")
+                scheduleWakeListening(delayMillis = 500L)
             }
             override fun onResults(b: Bundle?) {
                 if (sr !== recognizer) return
+                h.removeCallbacks(recognitionStartTimeout)
                 listening = false
                 recognitionActive = false
                 consecutiveRecognitionErrors = 0
@@ -317,6 +363,7 @@ class FloatingAssistantService : Service() {
         if (listening || recognitionActive || pendingSrStart) return
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés nem indítható mikrofonengedély nélkül")
+            showBubble("Mikrofonengedély szükséges.")
             return
         }
         if (sr == null) initSr()
@@ -341,6 +388,7 @@ class FloatingAssistantService : Service() {
     private fun restartSr() {
         pendingSrStart = false
         h.removeCallbacks(scoStartTimeout)
+        h.removeCallbacks(recognitionStartTimeout)
         if (listening) {
             try { sr?.cancel() } catch (e: Exception) {
                 android.util.Log.w("J.A.R.V.I.S.", "A korábbi hangfelismerés megszakítása sikertelen", e)
@@ -360,7 +408,7 @@ class FloatingAssistantService : Service() {
         if (wakeMatch != null) {
             val command = trimmed.substring(wakeMatch.range.last + 1).trim()
             if (command.isEmpty()) {
-                activateListening()
+                activateListeningNow()
                 return
             }
             runCmd(command)
@@ -371,7 +419,7 @@ class FloatingAssistantService : Service() {
         scheduleWakeListening()
     }
 
-    private fun activateListening() {
+    private fun activateListeningNow() {
         val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
         if (vibrator.hasVibrator()) {
             if (Build.VERSION.SDK_INT >= 26) {
@@ -382,6 +430,7 @@ class FloatingAssistantService : Service() {
             }
         }
         activeListening = true
+        thinking = false
         h.removeCallbacks(activeListeningTimeout)
         h.postDelayed(activeListeningTimeout, 8_000L)
         updateHudAnimation()
@@ -434,12 +483,15 @@ class FloatingAssistantService : Service() {
             recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hu-HU")
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             })
+            h.removeCallbacks(recognitionStartTimeout)
+            h.postDelayed(recognitionStartTimeout, 10_000L)
         }
         catch (e: Exception) {
+            h.removeCallbacks(recognitionStartTimeout)
             recognitionActive = false
             android.util.Log.e("J.A.R.V.I.S.", "Hangfelismerés indítása sikertelen", e)
+            showBubble("Mikrofon hiba: ${e.message ?: "indítás sikertelen"}")
             scheduleRecognitionRetry()
         }
     }
@@ -481,7 +533,30 @@ class FloatingAssistantService : Service() {
         }
     }
     private fun app(pkg: String, n: String) { val i = packageManager.getLaunchIntentForPackage(pkg); if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); say("$n megnyitása.") } else say("$n nincs telepítve.") }
-    private fun torch(on: Boolean) { try { val cm = getSystemService(CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], on); say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.") } catch (_: Exception) { say("Zseblámpa hiba.") } }
+    private fun torch(on: Boolean) {
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            say("A zseblámpához engedélyezd a kamera-hozzáférést a vezérlőpulton.")
+            return
+        }
+        try {
+            val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+            val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
+                cameraManager.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            }
+            if (cameraId == null) {
+                say("Ezen a készüléken nem érhető el zseblámpa.")
+                return
+            }
+            cameraManager.setTorchMode(cameraId, on)
+            say(if (on) "Zseblámpa bekapcsolva." else "Zseblámpa kikapcsolva.")
+        } catch (error: Exception) {
+            android.util.Log.e("J.A.R.V.I.S.", "A zseblámpa nem kapcsolható", error)
+            say("A zseblámpa nem kapcsolható.")
+        }
+    }
     private fun runCmd(raw: String) {
         val c = raw.lowercase(Locale("hu", "HU"))
         when {
@@ -771,6 +846,7 @@ class FloatingAssistantService : Service() {
     override fun onDestroy() {
         pendingSrStart = false
         h.removeCallbacks(activeListeningTimeout)
+        h.removeCallbacks(recognitionStartTimeout)
         h.removeCallbacks(hideBubble)
         h.removeCallbacks(scoStartTimeout)
         h.removeCallbacks(unmuteRecognizerSounds)
