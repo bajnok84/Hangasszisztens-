@@ -407,15 +407,14 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Makró broadcast")
             .setMessage(
-                "A Hangasszisztens nem tartalmaz beépített makró-fogadót. " +
-                    "A „makró <parancs>” hangutasítás ezt a broadcastot küldi ki:\n\n" +
+                "A MacroDroidban hozz létre egy „Intent Received” triggert ezzel az eseménnyel. " +
+                    "A „command” nevű szöveges extrát használd feltételként, hogy a megfelelő " +
+                    "makrót indítsa el. Például: „Neo, makró lámpa fel”.\n\n" +
                     "Esemény: $action\n" +
                     "Extra neve: command\n" +
                     "Extra típusa: szöveg\n\n" +
-                    "A fogadó automatizáló alkalmazásban erre az eseményre kell " +
-                    "fogadót beállítani, amely a „command” értéket használja. " +
-                    "A projektben nincs megadva célalkalmazás, ezért külső makrót " +
-                    "nem lehet automatikusan elindítani vagy konfigurálni."
+                    "A NEO ezt az eseményt küldi ki; a MacroDroid-makrókat külön kell " +
+                    "létrehozni és az extra értékére szűrni."
             )
             .setNeutralButton("ESEMÉNY MÁSOLÁSA") { _, _ ->
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

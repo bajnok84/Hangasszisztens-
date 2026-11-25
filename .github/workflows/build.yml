@@ -2,6 +2,7 @@ name: Android tests and APK
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -16,9 +17,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Run unit tests and assemble debug APK
         run: ./gradlew testDebugUnitTest assembleDebug
+      - name: Name APK for download
+        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/NEO-debug.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: KisHegedus-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: NEO-debug-apk
+          path: app/build/outputs/apk/debug/NEO-debug.apk
           if-no-files-found: error
           retention-days: 14
