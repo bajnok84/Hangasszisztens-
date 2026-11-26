@@ -34,17 +34,36 @@ class FloatingAssistantService : Service() {
             val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
             Thread.setDefaultUncaughtExceptionHandler { thread, error ->
                 val log = android.util.Log.getStackTraceString(error)
-                val saved = appContext.getSharedPreferences("neo_prefs", Context.MODE_PRIVATE)
-                    .edit().putString("last_crash_log", log).commit()
+                val preferences = appContext.getSharedPreferences("neo_prefs", Context.MODE_PRIVATE)
+                val now = System.currentTimeMillis()
+                val lastRecoveryPrompt = preferences.getLong("crash_recovery_prompt_at", 0L)
+                val shouldScheduleRecovery = now - lastRecoveryPrompt >= 10 * 60 * 1000L
+                val editor = preferences.edit()
+                    .putString("last_crash_log", log)
+                    .putInt("crash_count", preferences.getInt("crash_count", 0) + 1)
+                if (shouldScheduleRecovery) {
+                    editor.putLong("crash_recovery_prompt_at", now)
+                }
+                val saved = editor.commit()
                 if (!saved) android.util.Log.e("NEO", "Az összeomlási napló mentése sikertelen")
-                val restart = PendingIntent.getForegroundService(
-                    appContext,
-                    901,
-                    Intent(appContext, FloatingAssistantService::class.java),
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                (appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager)
-                    .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1_000L, restart)
+                if (saved && shouldScheduleRecovery) {
+                    try {
+                        val recovery = PendingIntent.getBroadcast(
+                            appContext,
+                            901,
+                            Intent(appContext, CrashRecoveryReceiver::class.java),
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                        )
+                        (appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager)
+                            .setAndAllowWhileIdle(
+                                AlarmManager.RTC_WAKEUP,
+                                now + 1_000L,
+                                recovery
+                            )
+                    } catch (scheduleError: RuntimeException) {
+                        android.util.Log.e("NEO", "Az összeomlás utáni értesítés nem ütemezhető", scheduleError)
+                    }
+                }
                 if (previousHandler != null) previousHandler.uncaughtException(thread, error)
                 else error.printStackTrace()
             }
@@ -706,79 +725,103 @@ class FloatingAssistantService : Service() {
         )
         var camera: CameraDevice? = null
         var session: CameraCaptureSession? = null
-        var delivered = false
-        fun cleanup() {
-            session?.close()
-            camera?.close()
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val resourceLock = Any()
+        fun finish(action: () -> Unit) {
+            if (!completed.compareAndSet(false, true)) return
+            val resources = synchronized(resourceLock) {
+                val current = session to camera
+                session = null
+                camera = null
+                current
+            }
+            resources.first?.close()
+            resources.second?.close()
+            reader.setOnImageAvailableListener(null, null)
             reader.close()
             cameraThread.quitSafely()
+            action()
         }
         reader.setOnImageAvailableListener({ imageReader ->
+            if (completed.get()) return@setOnImageAvailableListener
             val image = imageReader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            val bytes = image.planes[0].buffer.let { buffer ->
-                ByteArray(buffer.remaining()).also(buffer::get)
+            val bytes = try {
+                image.planes[0].buffer.let { buffer ->
+                    ByteArray(buffer.remaining()).also(buffer::get)
+                }
+            } catch (error: RuntimeException) {
+                android.util.Log.e("NEO", "A kamerakép nem olvasható", error)
+                finish { say("A kameraképet nem sikerült beolvasni.") }
+                return@setOnImageAvailableListener
+            } finally {
+                image.close()
             }
-            image.close()
-            if (!delivered) {
-                delivered = true
-                cleanup()
-                onCaptured(bytes)
-            }
+            finish { onCaptured(bytes) }
         }, cameraHandler)
         cameraHandler.postDelayed({
-            if (!delivered) {
-                delivered = true
-                cleanup()
-                say("A kamera időtúllépés miatt nem készített képet.")
-            }
+            finish { say("A kamera időtúllépés miatt nem készített képet.") }
         }, 8_000L)
         try {
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(openedCamera: CameraDevice) {
-                    camera = openedCamera
-                    openedCamera.createCaptureSession(
-                        listOf(reader.surface),
-                        object : CameraCaptureSession.StateCallback() {
+                    val alreadyFinished = synchronized(resourceLock) {
+                        if (completed.get()) true else {
+                            camera = openedCamera
+                            false
+                        }
+                    }
+                    if (alreadyFinished) {
+                        openedCamera.close()
+                        return
+                    }
+                    try {
+                        openedCamera.createCaptureSession(
+                            listOf(reader.surface),
+                            object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(configuredSession: CameraCaptureSession) {
-                                session = configuredSession
-                                val request = openedCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-                                    .apply { addTarget(reader.surface) }
-                                    .build()
-                                configuredSession.capture(request, null, cameraHandler)
+                                val alreadyFinished = synchronized(resourceLock) {
+                                    if (completed.get()) true else {
+                                        session = configuredSession
+                                        false
+                                    }
+                                }
+                                if (alreadyFinished) {
+                                    configuredSession.close()
+                                    return
+                                }
+                                try {
+                                    val request = openedCamera.createCaptureRequest(
+                                        CameraDevice.TEMPLATE_STILL_CAPTURE
+                                    ).apply { addTarget(reader.surface) }.build()
+                                    configuredSession.capture(request, null, cameraHandler)
+                                } catch (error: Exception) {
+                                    android.util.Log.e("NEO", "A kamerakép nem készíthető el", error)
+                                    finish { say("A kamerakép nem készíthető el.") }
+                                }
                             }
 
                             override fun onConfigureFailed(failedSession: CameraCaptureSession) {
-                                if (!delivered) {
-                                    delivered = true
-                                    cleanup()
-                                    say("A kamera előkészítése sikertelen.")
-                                }
+                                finish { say("A kamera előkészítése sikertelen.") }
                             }
-                        },
-                        cameraHandler
-                    )
+                            },
+                            cameraHandler
+                        )
+                    } catch (error: Exception) {
+                        android.util.Log.e("NEO", "A kamera munkamenete nem indítható", error)
+                        finish { say("A kamera munkamenete nem indítható.") }
+                    }
                 }
 
                 override fun onDisconnected(disconnectedCamera: CameraDevice) {
-                    disconnectedCamera.close()
-                    if (!delivered) {
-                        delivered = true
-                        cleanup()
-                        say("A kamera megszakadt.")
-                    }
+                    finish { say("A kamera megszakadt.") }
                 }
 
                 override fun onError(errorCamera: CameraDevice, errorCode: Int) {
-                    errorCamera.close()
-                    if (!delivered) {
-                        delivered = true
-                        cleanup()
-                        say("Kamera hiba: $errorCode.")
-                    }
+                    finish { say("Kamera hiba: $errorCode.") }
                 }
             }, cameraHandler)
         } catch (error: Exception) {
-            cleanup()
+            finish {}
             android.util.Log.e("NEO", "Kamerakép készítése sikertelen", error)
             say("A kamera nem indítható.")
         }
@@ -961,6 +1004,7 @@ class FloatingAssistantService : Service() {
                 val (prompt, conversationMemory) = synchronized(hist) {
                     val now = System.currentTimeMillis()
                     if (now - historyUpdatedAt > 10 * 60 * 1000L) hist.clear()
+                    while (hist.size >= 12) hist.removeFirst()
                     hist.addLast("Felhasználó: $q")
                     historyUpdatedAt = now
                     Pair(q, hist.toList().dropLast(1))

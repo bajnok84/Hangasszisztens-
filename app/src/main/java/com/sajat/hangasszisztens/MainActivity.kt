@@ -36,6 +36,7 @@ import androidx.core.content.ContextCompat
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
+    private var pendingAutoGreeting = false
     private val diagnosticDots = mutableMapOf<String, View>()
     private lateinit var hudView: NeoHudView
     private var hudReceiverRegistered = false
@@ -59,6 +60,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingAutoGreeting =
+            intent.action == BluetoothAutoReceiver.ACTION_OPEN_FROM_BLUETOOTH
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#060B19"))
         }
@@ -229,7 +232,7 @@ class MainActivity : AppCompatActivity() {
                 null
             }
             setText(savedKey)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             background = GradientDrawable().apply {
                 cornerRadius = dp(12).toFloat()
                 setColor(Color.argb(190, 8, 17, 33))
@@ -241,6 +244,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         content.addView(input)
+        content.addView(TextView(this).apply {
+            text = "A kamera AI-látása OpenRouter API-kulccsal működik; a kép elemzésre külső AI-szolgáltatóhoz kerül."
+            textSize = 12f
+            setTextColor(Color.parseColor("#91A7B8"))
+            setPadding(dp(4), dp(2), dp(4), dp(8))
+        })
 
         val status = TextView(this).apply {
             text = ""
@@ -299,6 +308,9 @@ class MainActivity : AppCompatActivity() {
             addView(content)
         }, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+        if (pendingAutoGreeting) {
+            root.post { startAssistantWhenReady() }
+        }
         for (index in 0 until content.childCount) {
             val child = content.getChildAt(index)
             child.alpha = 0f
@@ -324,6 +336,15 @@ class MainActivity : AppCompatActivity() {
             hudReceiverRegistered = true
         }
         refreshDiagnostics()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == BluetoothAutoReceiver.ACTION_OPEN_FROM_BLUETOOTH) {
+            pendingAutoGreeting = true
+            startAssistantWhenReady()
+        }
     }
 
     override fun onPause() {
@@ -407,7 +428,9 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Makró broadcast")
             .setMessage(
-                "A MacroDroidban hozz létre egy „Intent Received” triggert ezzel az eseménnyel. " +
+                "Figyelem: a makróparancs broadcastját a készülék más, erre figyelő alkalmazásai is fogadhatják. " +
+                    "Csak megbízható automatizáló alkalmazáshoz állíts be fogadót.\n\n" +
+                    "A MacroDroidban hozz létre egy „Intent Received” triggert ezzel az eseménnyel. " +
                     "A „command” nevű szöveges extrát használd feltételként, hogy a megfelelő " +
                     "makrót indítsa el. Például: „Neo, makró lámpa fel”.\n\n" +
                     "Esemény: $action\n" +
@@ -456,7 +479,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         val intent = Intent(this, FloatingAssistantService::class.java)
+            .putExtra(FloatingAssistantService.EXTRA_AUTO_GREETING, pendingAutoGreeting)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+        pendingAutoGreeting = false
     }
 
     override fun onRequestPermissionsResult(

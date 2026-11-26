@@ -3,9 +3,11 @@
     <cloud-backup>
         <exclude domain="sharedpref" path="jarvis_prefs.xml" />
         <exclude domain="sharedpref" path="secure_jarvis_prefs.xml" />
+        <exclude domain="sharedpref" path="neo_prefs.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="jarvis_prefs.xml" />
         <exclude domain="sharedpref" path="secure_jarvis_prefs.xml" />
+        <exclude domain="sharedpref" path="neo_prefs.xml" />
     </device-transfer>
 </data-extraction-rules>

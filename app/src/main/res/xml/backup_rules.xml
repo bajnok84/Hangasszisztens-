@@ -2,4 +2,5 @@
 <full-backup-content>
     <exclude domain="sharedpref" path="jarvis_prefs.xml" />
     <exclude domain="sharedpref" path="secure_jarvis_prefs.xml" />
+    <exclude domain="sharedpref" path="neo_prefs.xml" />
 </full-backup-content>
