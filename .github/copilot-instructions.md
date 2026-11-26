@@ -8,5 +8,6 @@
 - API-kulcsot, személyes adatot vagy más titkot ne írj forráskódba, naplóba vagy CI-kimenetbe; kövesd a projekt biztonságos tárolási megoldásait.
 - Mikrofon- és kamerahasználatnál tartsd be az Android engedélykéréseit, előtérszolgáltatási és háttérindítási korlátozásait. Háttérből ne indíts felhasználói interakciót igénylő rögzítést.
 - Helyi ellenőrzéshez Java 21-et és a Gradle wrappert használd. Kódmódosítás után futtasd a `./gradlew testDebugUnitTest assembleDebug` parancsot; a sikertelen vagy megszakadt buildet ne jelentsd sikeresnek.
+- Sikeres végső ellenőrzés után commitold és pushold az adott feladat változtatásait az aktuális ágra. Csak a feladathoz tartozó fájlokat commitold; sikertelen ellenőrzésnél ne commitolj, soha ne használj force push-t, és távoli eltérésnél őrizd meg a mások módosításait.
 - Új függőséget, SDK-célszintet, Gradle- vagy Android Gradle Plugin-verziót csak a feladat indokoltsága esetén változtass.
 - Szerepválasztás: implementáláshoz `android-developer`, teszteléshez és regresszió-ellenőrzéshez `android-test-engineer`, biztonsági kódellenőrzéshez `android-security-reviewer` szerepet használd.

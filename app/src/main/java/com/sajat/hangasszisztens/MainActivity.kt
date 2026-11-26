@@ -36,7 +36,6 @@ import androidx.core.content.ContextCompat
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
-    private var pendingAutoGreeting = false
     private val diagnosticDots = mutableMapOf<String, View>()
     private lateinit var hudView: NeoHudView
     private var hudReceiverRegistered = false
@@ -60,8 +59,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingAutoGreeting =
-            intent.action == BluetoothAutoReceiver.ACTION_OPEN_FROM_BLUETOOTH
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#060B19"))
         }
@@ -150,14 +147,18 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle("Frissítési napló · ${BuildConfig.VERSION_NAME}")
                 .setMessage(
-                    "1.4.2 (aktuális)\n" +
+                    "1.4.4 (aktuális)\n" +
+                    "• A mikrofonfigyelés csak felhasználói indítás után kezdődik; az app megnyitása nem indítja el.\n" +
+                    "• Bluetooth-kapcsolat és headset-/médiagomb nem indítja el automatikusan.\n" +
+                    "• Induláskori hangos üdvözlés eltávolítva.\n\n" +
+                    "1.4.2\n" +
                         "• Android 14+ mikrofonos előtérszolgáltatás a hangfelismeréshez.\n" +
                         "• Javított lebegőgomb-érintés, magyar hallgatási és mikrofonhiba-visszajelzés.\n" +
                         "• A hangfelismerés már nem kényszeríti ki az offline nyelvi modellt.\n" +
                         "• A mikrofon az indításhoz kötelező; a Bluetooth, kamera és értesítések külön engedélyezhetők.\n\n" +
                         "1.4.1\n" +
                         "• Keskeny, dokkolható lebegő vezérlő és 3D HUD-ikon.\n" +
-                        "• Bluetooth headsetgomb- és hangútvonal-támogatás.\n\n" +
+                        "• Bluetooth-hangútvonal támogatása.\n\n" +
                         "1.3\n" +
                         "• API-kulcs titkosított tárolása és kizárása a biztonsági mentésekből.\n" +
                         "• Időzítő- és ébresztőértékek ellenőrzése, hibajelzések.\n" +
@@ -308,9 +309,6 @@ class MainActivity : AppCompatActivity() {
             addView(content)
         }, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
-        if (pendingAutoGreeting) {
-            root.post { startAssistantWhenReady() }
-        }
         for (index in 0 until content.childCount) {
             val child = content.getChildAt(index)
             child.alpha = 0f
@@ -341,10 +339,6 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == BluetoothAutoReceiver.ACTION_OPEN_FROM_BLUETOOTH) {
-            pendingAutoGreeting = true
-            startAssistantWhenReady()
-        }
     }
 
     override fun onPause() {
@@ -479,9 +473,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         val intent = Intent(this, FloatingAssistantService::class.java)
-            .putExtra(FloatingAssistantService.EXTRA_AUTO_GREETING, pendingAutoGreeting)
+            .setAction(FloatingAssistantService.ACTION_USER_START)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
-        pendingAutoGreeting = false
     }
 
     override fun onRequestPermissionsResult(

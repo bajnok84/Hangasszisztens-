@@ -10,20 +10,17 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import androidx.core.content.ContextCompat
 import androidx.core.app.ServiceCompat
 class FloatingAssistantService : Service() {
     companion object {
-        const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
+        const val ACTION_USER_START = AssistantStartPolicy.USER_START_ACTION
         const val ACTION_MACRO_COMMAND = "com.sajat.hangasszisztens.MACRO_COMMAND"
         const val ACTION_HUD_UPDATE = "com.sajat.hangasszisztens.HUD_UPDATE"
         const val EXTRA_HUD_STATE = "hud_state"
         const val EXTRA_HUD_RMS = "hud_rms"
-        const val EXTRA_AUTO_GREETING = "auto_greeting"
         private const val NOTIFICATION_ID = 1
         private const val NOTIFICATION_CHANNEL_ID = "neo_ch"
         private val crashHandlerInstalled = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -82,7 +79,6 @@ class FloatingAssistantService : Service() {
     private var ttsReady = false
     private var historyUpdatedAt = 0L
     private lateinit var audioManager: AudioManager
-    private var mediaSession: MediaSession? = null
     private var pendingSrStart = false
     private var recognitionActive = false
     private var consecutiveRecognitionErrors = 0
@@ -150,6 +146,11 @@ class FloatingAssistantService : Service() {
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!AssistantStartPolicy.accepts(intent?.action)) {
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+
         if (!Settings.canDrawOverlays(this) ||
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -170,16 +171,8 @@ class FloatingAssistantService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         )
 
-        if (intent?.action == ACTION_START_LISTENING) {
-            tts?.stop()
-            speaking = false
-            restartAfterSpeech = false
-            activateListeningNow()
-        } else startSr()
-        if (intent?.getBooleanExtra(EXTRA_AUTO_GREETING, false) == true) {
-            say("NEO csatlakozott. Miben segíthetek?")
-        }
-        return START_STICKY
+        startSr()
+        return START_NOT_STICKY
     }
 
     override fun onCreate() {
@@ -293,7 +286,7 @@ class FloatingAssistantService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
         wm.addView(closeBtn, closeParams); wm.addView(root, params); wm.addView(bubble, bubbleParams)
-        dock(); touch(); initSr(); initMediaSession()
+        dock(); touch(); initSr()
         h.postDelayed(watchdog, 12_000L)
     }
     private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#AA060B19")); setStroke(dp(1f), Color.parseColor("#7700E676")) }
@@ -405,43 +398,6 @@ class FloatingAssistantService : Service() {
                 lastSpeechEventAt = SystemClock.elapsedRealtime()
             }
         })
-    }
-    private fun initMediaSession() {
-        mediaSession = MediaSession(this, "NEO").apply {
-            setCallback(object : MediaSession.Callback() {
-                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
-                    val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                    if (event != null && event.keyCode in listOf(
-                            KeyEvent.KEYCODE_CALL,
-                            KeyEvent.KEYCODE_HEADSETHOOK,
-                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                            KeyEvent.KEYCODE_MEDIA_PLAY,
-                            KeyEvent.KEYCODE_MEDIA_PAUSE
-                        ) && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                        tts?.stop()
-                        speaking = false
-                        restartAfterSpeech = false
-                        activateListeningNow()
-                        return true
-                    }
-                    return super.onMediaButtonEvent(mediaButtonIntent)
-                }
-                override fun onPlay() = restartSr()
-                override fun onPause() = restartSr()
-            })
-            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
-            val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON, null, this@FloatingAssistantService, MediaButtonReceiver::class.java)
-            setMediaButtonReceiver(
-                PendingIntent.getBroadcast(
-                    this@FloatingAssistantService,
-                    0,
-                    mediaButtonIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            )
-            setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE).setState(PlaybackState.STATE_PAUSED, 0, 0f).build())
-            isActive = true
-        }
     }
     private fun bluetoothHeadset(): AudioDeviceInfo? {
         if (Build.VERSION.SDK_INT >= 31) {
@@ -1203,8 +1159,6 @@ class FloatingAssistantService : Service() {
         if (scoReceiverRegistered) {
             try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("NEO", "SCO receiver was already unregistered", e) }
         }
-        mediaSession?.run { isActive = false; release() }
-        mediaSession = null
         if (Build.VERSION.SDK_INT >= 31) {
             if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 val previousDevice = originalCommunicationDevice
