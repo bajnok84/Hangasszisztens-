@@ -147,18 +147,14 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle("Frissítési napló · ${BuildConfig.VERSION_NAME}")
                 .setMessage(
-                    "1.4.4 (aktuális)\n" +
-                    "• A mikrofonfigyelés csak felhasználói indítás után kezdődik; az app megnyitása nem indítja el.\n" +
-                    "• Bluetooth-kapcsolat és headset-/médiagomb nem indítja el automatikusan.\n" +
-                    "• Induláskori hangos üdvözlés eltávolítva.\n\n" +
-                    "1.4.2\n" +
+                    "1.4.2 (aktuális)\n" +
                         "• Android 14+ mikrofonos előtérszolgáltatás a hangfelismeréshez.\n" +
                         "• Javított lebegőgomb-érintés, magyar hallgatási és mikrofonhiba-visszajelzés.\n" +
                         "• A hangfelismerés már nem kényszeríti ki az offline nyelvi modellt.\n" +
                         "• A mikrofon az indításhoz kötelező; a Bluetooth, kamera és értesítések külön engedélyezhetők.\n\n" +
                         "1.4.1\n" +
                         "• Keskeny, dokkolható lebegő vezérlő és 3D HUD-ikon.\n" +
-                        "• Bluetooth-hangútvonal támogatása.\n\n" +
+                        "• Bluetooth headsetgomb- és hangútvonal-támogatás.\n\n" +
                         "1.3\n" +
                         "• API-kulcs titkosított tárolása és kizárása a biztonsági mentésekből.\n" +
                         "• Időzítő- és ébresztőértékek ellenőrzése, hibajelzések.\n" +
@@ -233,7 +229,7 @@ class MainActivity : AppCompatActivity() {
                 null
             }
             setText(savedKey)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
             background = GradientDrawable().apply {
                 cornerRadius = dp(12).toFloat()
                 setColor(Color.argb(190, 8, 17, 33))
@@ -245,12 +241,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         content.addView(input)
-        content.addView(TextView(this).apply {
-            text = "A kamera AI-látása OpenRouter API-kulccsal működik; a kép elemzésre külső AI-szolgáltatóhoz kerül."
-            textSize = 12f
-            setTextColor(Color.parseColor("#91A7B8"))
-            setPadding(dp(4), dp(2), dp(4), dp(8))
-        })
 
         val status = TextView(this).apply {
             text = ""
@@ -336,11 +326,6 @@ class MainActivity : AppCompatActivity() {
         refreshDiagnostics()
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-    }
-
     override fun onPause() {
         if (hudReceiverRegistered) {
             unregisterReceiver(hudReceiver)
@@ -422,9 +407,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Makró broadcast")
             .setMessage(
-                "Figyelem: a makróparancs broadcastját a készülék más, erre figyelő alkalmazásai is fogadhatják. " +
-                    "Csak megbízható automatizáló alkalmazáshoz állíts be fogadót.\n\n" +
-                    "A MacroDroidban hozz létre egy „Intent Received” triggert ezzel az eseménnyel. " +
+                "A MacroDroidban hozz létre egy „Intent Received” triggert ezzel az eseménnyel. " +
                     "A „command” nevű szöveges extrát használd feltételként, hogy a megfelelő " +
                     "makrót indítsa el. Például: „Neo, makró lámpa fel”.\n\n" +
                     "Esemény: $action\n" +
@@ -473,7 +456,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         val intent = Intent(this, FloatingAssistantService::class.java)
-            .setAction(FloatingAssistantService.ACTION_USER_START)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
     }
 

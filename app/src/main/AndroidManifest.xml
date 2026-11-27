@@ -41,9 +41,22 @@
             </intent-filter>
         </activity>
         <receiver
-            android:name=".CrashRecoveryReceiver"
+            android:name=".MediaButtonReceiver"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".BluetoothAutoReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BLUETOOTH">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".FloatingAssistantService"
             android:enabled="true"

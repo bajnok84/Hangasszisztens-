@@ -10,17 +10,20 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import androidx.core.content.ContextCompat
 import androidx.core.app.ServiceCompat
 class FloatingAssistantService : Service() {
     companion object {
-        const val ACTION_USER_START = AssistantStartPolicy.USER_START_ACTION
+        const val ACTION_START_LISTENING = "com.sajat.hangasszisztens.START_LISTENING"
         const val ACTION_MACRO_COMMAND = "com.sajat.hangasszisztens.MACRO_COMMAND"
         const val ACTION_HUD_UPDATE = "com.sajat.hangasszisztens.HUD_UPDATE"
         const val EXTRA_HUD_STATE = "hud_state"
         const val EXTRA_HUD_RMS = "hud_rms"
+        const val EXTRA_AUTO_GREETING = "auto_greeting"
         private const val NOTIFICATION_ID = 1
         private const val NOTIFICATION_CHANNEL_ID = "neo_ch"
         private val crashHandlerInstalled = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -31,36 +34,17 @@ class FloatingAssistantService : Service() {
             val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
             Thread.setDefaultUncaughtExceptionHandler { thread, error ->
                 val log = android.util.Log.getStackTraceString(error)
-                val preferences = appContext.getSharedPreferences("neo_prefs", Context.MODE_PRIVATE)
-                val now = System.currentTimeMillis()
-                val lastRecoveryPrompt = preferences.getLong("crash_recovery_prompt_at", 0L)
-                val shouldScheduleRecovery = now - lastRecoveryPrompt >= 10 * 60 * 1000L
-                val editor = preferences.edit()
-                    .putString("last_crash_log", log)
-                    .putInt("crash_count", preferences.getInt("crash_count", 0) + 1)
-                if (shouldScheduleRecovery) {
-                    editor.putLong("crash_recovery_prompt_at", now)
-                }
-                val saved = editor.commit()
+                val saved = appContext.getSharedPreferences("neo_prefs", Context.MODE_PRIVATE)
+                    .edit().putString("last_crash_log", log).commit()
                 if (!saved) android.util.Log.e("NEO", "Az összeomlási napló mentése sikertelen")
-                if (saved && shouldScheduleRecovery) {
-                    try {
-                        val recovery = PendingIntent.getBroadcast(
-                            appContext,
-                            901,
-                            Intent(appContext, CrashRecoveryReceiver::class.java),
-                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                        )
-                        (appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager)
-                            .setAndAllowWhileIdle(
-                                AlarmManager.RTC_WAKEUP,
-                                now + 1_000L,
-                                recovery
-                            )
-                    } catch (scheduleError: RuntimeException) {
-                        android.util.Log.e("NEO", "Az összeomlás utáni értesítés nem ütemezhető", scheduleError)
-                    }
-                }
+                val restart = PendingIntent.getForegroundService(
+                    appContext,
+                    901,
+                    Intent(appContext, FloatingAssistantService::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                (appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager)
+                    .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1_000L, restart)
                 if (previousHandler != null) previousHandler.uncaughtException(thread, error)
                 else error.printStackTrace()
             }
@@ -79,6 +63,7 @@ class FloatingAssistantService : Service() {
     private var ttsReady = false
     private var historyUpdatedAt = 0L
     private lateinit var audioManager: AudioManager
+    private var mediaSession: MediaSession? = null
     private var pendingSrStart = false
     private var recognitionActive = false
     private var consecutiveRecognitionErrors = 0
@@ -146,11 +131,6 @@ class FloatingAssistantService : Service() {
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!AssistantStartPolicy.accepts(intent?.action)) {
-            stopSelfResult(startId)
-            return START_NOT_STICKY
-        }
-
         if (!Settings.canDrawOverlays(this) ||
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -171,8 +151,16 @@ class FloatingAssistantService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         )
 
-        startSr()
-        return START_NOT_STICKY
+        if (intent?.action == ACTION_START_LISTENING) {
+            tts?.stop()
+            speaking = false
+            restartAfterSpeech = false
+            activateListeningNow()
+        } else startSr()
+        if (intent?.getBooleanExtra(EXTRA_AUTO_GREETING, false) == true) {
+            say("NEO csatlakozott. Miben segíthetek?")
+        }
+        return START_STICKY
     }
 
     override fun onCreate() {
@@ -286,7 +274,7 @@ class FloatingAssistantService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
         wm.addView(closeBtn, closeParams); wm.addView(root, params); wm.addView(bubble, bubbleParams)
-        dock(); touch(); initSr()
+        dock(); touch(); initSr(); initMediaSession()
         h.postDelayed(watchdog, 12_000L)
     }
     private fun hudBackground() = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(Color.parseColor("#AA060B19")); setStroke(dp(1f), Color.parseColor("#7700E676")) }
@@ -398,6 +386,43 @@ class FloatingAssistantService : Service() {
                 lastSpeechEventAt = SystemClock.elapsedRealtime()
             }
         })
+    }
+    private fun initMediaSession() {
+        mediaSession = MediaSession(this, "NEO").apply {
+            setCallback(object : MediaSession.Callback() {
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    if (event != null && event.keyCode in listOf(
+                            KeyEvent.KEYCODE_CALL,
+                            KeyEvent.KEYCODE_HEADSETHOOK,
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                            KeyEvent.KEYCODE_MEDIA_PLAY,
+                            KeyEvent.KEYCODE_MEDIA_PAUSE
+                        ) && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        tts?.stop()
+                        speaking = false
+                        restartAfterSpeech = false
+                        activateListeningNow()
+                        return true
+                    }
+                    return super.onMediaButtonEvent(mediaButtonIntent)
+                }
+                override fun onPlay() = restartSr()
+                override fun onPause() = restartSr()
+            })
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON, null, this@FloatingAssistantService, MediaButtonReceiver::class.java)
+            setMediaButtonReceiver(
+                PendingIntent.getBroadcast(
+                    this@FloatingAssistantService,
+                    0,
+                    mediaButtonIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+            setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE).setState(PlaybackState.STATE_PAUSED, 0, 0f).build())
+            isActive = true
+        }
     }
     private fun bluetoothHeadset(): AudioDeviceInfo? {
         if (Build.VERSION.SDK_INT >= 31) {
@@ -681,103 +706,79 @@ class FloatingAssistantService : Service() {
         )
         var camera: CameraDevice? = null
         var session: CameraCaptureSession? = null
-        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
-        val resourceLock = Any()
-        fun finish(action: () -> Unit) {
-            if (!completed.compareAndSet(false, true)) return
-            val resources = synchronized(resourceLock) {
-                val current = session to camera
-                session = null
-                camera = null
-                current
-            }
-            resources.first?.close()
-            resources.second?.close()
-            reader.setOnImageAvailableListener(null, null)
+        var delivered = false
+        fun cleanup() {
+            session?.close()
+            camera?.close()
             reader.close()
             cameraThread.quitSafely()
-            action()
         }
         reader.setOnImageAvailableListener({ imageReader ->
-            if (completed.get()) return@setOnImageAvailableListener
             val image = imageReader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            val bytes = try {
-                image.planes[0].buffer.let { buffer ->
-                    ByteArray(buffer.remaining()).also(buffer::get)
-                }
-            } catch (error: RuntimeException) {
-                android.util.Log.e("NEO", "A kamerakép nem olvasható", error)
-                finish { say("A kameraképet nem sikerült beolvasni.") }
-                return@setOnImageAvailableListener
-            } finally {
-                image.close()
+            val bytes = image.planes[0].buffer.let { buffer ->
+                ByteArray(buffer.remaining()).also(buffer::get)
             }
-            finish { onCaptured(bytes) }
+            image.close()
+            if (!delivered) {
+                delivered = true
+                cleanup()
+                onCaptured(bytes)
+            }
         }, cameraHandler)
         cameraHandler.postDelayed({
-            finish { say("A kamera időtúllépés miatt nem készített képet.") }
+            if (!delivered) {
+                delivered = true
+                cleanup()
+                say("A kamera időtúllépés miatt nem készített képet.")
+            }
         }, 8_000L)
         try {
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(openedCamera: CameraDevice) {
-                    val alreadyFinished = synchronized(resourceLock) {
-                        if (completed.get()) true else {
-                            camera = openedCamera
-                            false
-                        }
-                    }
-                    if (alreadyFinished) {
-                        openedCamera.close()
-                        return
-                    }
-                    try {
-                        openedCamera.createCaptureSession(
-                            listOf(reader.surface),
-                            object : CameraCaptureSession.StateCallback() {
+                    camera = openedCamera
+                    openedCamera.createCaptureSession(
+                        listOf(reader.surface),
+                        object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(configuredSession: CameraCaptureSession) {
-                                val alreadyFinished = synchronized(resourceLock) {
-                                    if (completed.get()) true else {
-                                        session = configuredSession
-                                        false
-                                    }
-                                }
-                                if (alreadyFinished) {
-                                    configuredSession.close()
-                                    return
-                                }
-                                try {
-                                    val request = openedCamera.createCaptureRequest(
-                                        CameraDevice.TEMPLATE_STILL_CAPTURE
-                                    ).apply { addTarget(reader.surface) }.build()
-                                    configuredSession.capture(request, null, cameraHandler)
-                                } catch (error: Exception) {
-                                    android.util.Log.e("NEO", "A kamerakép nem készíthető el", error)
-                                    finish { say("A kamerakép nem készíthető el.") }
-                                }
+                                session = configuredSession
+                                val request = openedCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                                    .apply { addTarget(reader.surface) }
+                                    .build()
+                                configuredSession.capture(request, null, cameraHandler)
                             }
 
                             override fun onConfigureFailed(failedSession: CameraCaptureSession) {
-                                finish { say("A kamera előkészítése sikertelen.") }
+                                if (!delivered) {
+                                    delivered = true
+                                    cleanup()
+                                    say("A kamera előkészítése sikertelen.")
+                                }
                             }
-                            },
-                            cameraHandler
-                        )
-                    } catch (error: Exception) {
-                        android.util.Log.e("NEO", "A kamera munkamenete nem indítható", error)
-                        finish { say("A kamera munkamenete nem indítható.") }
-                    }
+                        },
+                        cameraHandler
+                    )
                 }
 
                 override fun onDisconnected(disconnectedCamera: CameraDevice) {
-                    finish { say("A kamera megszakadt.") }
+                    disconnectedCamera.close()
+                    if (!delivered) {
+                        delivered = true
+                        cleanup()
+                        say("A kamera megszakadt.")
+                    }
                 }
 
                 override fun onError(errorCamera: CameraDevice, errorCode: Int) {
-                    finish { say("Kamera hiba: $errorCode.") }
+                    errorCamera.close()
+                    if (!delivered) {
+                        delivered = true
+                        cleanup()
+                        say("Kamera hiba: $errorCode.")
+                    }
                 }
             }, cameraHandler)
         } catch (error: Exception) {
-            finish {}
+            cleanup()
             android.util.Log.e("NEO", "Kamerakép készítése sikertelen", error)
             say("A kamera nem indítható.")
         }
@@ -960,7 +961,6 @@ class FloatingAssistantService : Service() {
                 val (prompt, conversationMemory) = synchronized(hist) {
                     val now = System.currentTimeMillis()
                     if (now - historyUpdatedAt > 10 * 60 * 1000L) hist.clear()
-                    while (hist.size >= 12) hist.removeFirst()
                     hist.addLast("Felhasználó: $q")
                     historyUpdatedAt = now
                     Pair(q, hist.toList().dropLast(1))
@@ -1159,6 +1159,8 @@ class FloatingAssistantService : Service() {
         if (scoReceiverRegistered) {
             try { unregisterReceiver(scoReceiver) } catch (e: IllegalArgumentException) { android.util.Log.w("NEO", "SCO receiver was already unregistered", e) }
         }
+        mediaSession?.run { isActive = false; release() }
+        mediaSession = null
         if (Build.VERSION.SDK_INT >= 31) {
             if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 val previousDevice = originalCommunicationDevice
